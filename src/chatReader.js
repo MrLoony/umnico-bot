@@ -1,81 +1,27 @@
-const selectors = require('./selectors');
-const { normalizeText, sleep, uniqueNonEmpty } = require('./utils');
-
-const INCOMING_HINTS = [
-  'incoming',
-  'inbound',
-  'received',
-  'client',
-  'customer',
-  'guest',
-  'lead',
-  'visitor',
-  'external',
-  'from-client',
-  'from-user',
-  'message-in'
-];
-
-const OUTGOING_HINTS = [
-  'outgoing',
-  'outbound',
-  'sent',
-  'operator',
-  'manager',
-  'agent',
-  'employee',
-  'company',
-  'support-reply',
-  'from-company',
-  'my-message',
-  'message-out'
-];
-
-const MANAGER_NAME_SELECTORS = [
-  '[data-manager-name]',
-  '[data-user-name]',
-  '[data-sender-name]',
-  '[class*="author"]',
-  '[class*="sender"]',
-  '[class*="manager"]',
-  '[class*="operator"]',
-  '[class*="employee"]',
-  '[class*="user"]',
-  '[aria-label]',
-  '[title]'
-];
-
-const TIMESTAMP_SELECTORS = [
-  'time[datetime]',
-  'time',
-  '[data-timestamp]',
-  '[data-time]',
-  '[class*="timestamp"]',
-  '[class*="date"]',
-  '[class*="time"]',
-  '[class*="meta"]',
-  '[class*="status"]',
-  '[class*="info"]'
-];
+const selectors = require("./selectors");
+const { normalizeText, sleep, uniqueNonEmpty } = require("./utils");
 
 async function readOpenChat(page, logger, config) {
   const historyLocator = page.locator(selectors.chat.history);
 
   try {
-    await historyLocator.waitFor({ state: 'visible', timeout: config.openChatTimeoutMs });
+    await historyLocator.waitFor({
+      state: "visible",
+      timeout: config.openChatTimeoutMs,
+    });
   } catch (error) {
-    await logger.warn('Open chat history container was not found in time', {
+    await logger.warn("Open chat history container was not found in time", {
       error: error.message,
-      selector: selectors.chat.history
+      selector: selectors.chat.history,
     });
 
     return {
-      sourceOpenChat: '',
+      sourceOpenChat: "",
       lastMessages: [],
       lastIncomingCandidateMessages: [],
-      incomingDetectionMode: 'history_not_found',
+      incomingDetectionMode: "history_not_found",
       messageTimeline: [],
-      acceptButtonDetected: false
+      acceptButtonDetected: false,
     };
   }
 
@@ -83,233 +29,173 @@ async function readOpenChat(page, logger, config) {
     await sleep(config.postOpenDelayMs);
   }
 
-  const messageSnapshot = await page.locator(selectors.chat.messageItem).evaluateAll((nodes, payload) => {
-    const cleanText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const messageSnapshot = await historyLocator.evaluate(
+    (historyNode, payload) => {
+      const cleanText = (value) =>
+        String(value || "")
+          .replace(/\s+/g, " ")
+          .trim();
 
-    const looksLikeTimestamp = (value) => {
-      const normalized = cleanText(value).toLowerCase();
-      return Boolean(
-        normalized.match(/\b\d{1,2}:\d{2}\b/)
-        || normalized.match(/\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b/)
-        || normalized.includes('today')
-        || normalized.includes('yesterday')
-        || normalized.includes('сегодня')
-        || normalized.includes('вчера')
-      );
-    };
+      const getJoinedText = (rootNode, selector) =>
+        cleanText(
+          Array.from(rootNode.querySelectorAll(selector))
+            .map((node) => cleanText(node.textContent || ""))
+            .filter(Boolean)
+            .join(" "),
+        );
 
-    const collectMetadata = (node) => {
-      const metadataParts = [];
-      let current = node;
-      let depth = 0;
-
-      while (current && depth < 4) {
-        metadataParts.push(current.className || '');
-        metadataParts.push(current.getAttribute('data-direction') || '');
-        metadataParts.push(current.getAttribute('data-message-direction') || '');
-        metadataParts.push(current.getAttribute('data-side') || '');
-        metadataParts.push(current.getAttribute('data-align') || '');
-        metadataParts.push(current.getAttribute('aria-label') || '');
-        metadataParts.push(current.getAttribute('title') || '');
-        current = current.parentElement;
-        depth += 1;
-      }
-
-      return cleanText(metadataParts.join(' ')).toLowerCase();
-    };
-
-    const collectNearbyNodes = (node, selectorList) => {
-      const found = [];
-      const seen = new Set();
-      let current = node;
-      let depth = 0;
-
-      while (current && depth < 3) {
-        for (const selector of selectorList) {
-          for (const candidate of current.querySelectorAll(selector)) {
-            if (seen.has(candidate)) {
-              continue;
-            }
-
-            seen.add(candidate);
-            found.push(candidate);
-          }
+      const getTimestampText = (itemNode, stackNode) => {
+        const itemName = cleanText(itemNode.getAttribute("name"));
+        if (itemName) {
+          return itemName;
         }
 
-        current = current.parentElement;
-        depth += 1;
-      }
-
-      return found;
-    };
-
-    const inferDirection = (metadata) => {
-      const incomingScore = payload.incomingHints.reduce((score, hint) => (
-        metadata.includes(hint) ? score + 1 : score
-      ), 0);
-      const outgoingScore = payload.outgoingHints.reduce((score, hint) => (
-        metadata.includes(hint) ? score + 1 : score
-      ), 0);
-
-      if (incomingScore > outgoingScore && incomingScore > 0) {
-        return 'incoming';
-      }
-
-      if (outgoingScore > incomingScore && outgoingScore > 0) {
-        return 'outgoing';
-      }
-
-      return 'unknown';
-    };
-
-    const extractManagerName = (node, messageText, metadata) => {
-      const nearbyNodes = collectNearbyNodes(node, payload.managerNameSelectors);
-      const candidateTexts = nearbyNodes
-        .flatMap((candidate) => ([
-          candidate.getAttribute('data-manager-name') || '',
-          candidate.getAttribute('data-user-name') || '',
-          candidate.getAttribute('data-sender-name') || '',
-          candidate.getAttribute('aria-label') || '',
-          candidate.getAttribute('title') || '',
-          candidate.textContent || ''
-        ]))
-        .map((value) => cleanText(value))
-        .filter((value) => value && value !== messageText && value.length <= 140);
-
-      const combinedMetadata = cleanText([metadata, ...candidateTexts].join(' | '));
-      const explicitPatterns = [
-        /отправлено пользователем\s+[«„"]?([^"»“]+)[»”"]?/i,
-        /отправлено менеджером\s+[«„"]?([^"»“]+)[»”"]?/i,
-        /sent by (?:user|manager|agent)\s+[«„"]?([^"»“]+)[»”"]?/i
-      ];
-
-      for (const pattern of explicitPatterns) {
-        const match = combinedMetadata.match(pattern);
-        if (match && cleanText(match[1])) {
-          return cleanText(match[1]);
+        const itemInfoTitle = cleanText(
+          itemNode.querySelector(".im-info")?.getAttribute("title"),
+        );
+        if (itemInfoTitle) {
+          return itemInfoTitle;
         }
-      }
 
-      const directName = candidateTexts.find((value) => !looksLikeTimestamp(value));
-      return directName || '';
-    };
-
-    const extractTimestampText = (node, metadata) => {
-      const nearbyNodes = collectNearbyNodes(node, payload.timestampSelectors);
-      const candidateValues = nearbyNodes
-        .flatMap((candidate) => ([
-          candidate.getAttribute('datetime') || '',
-          candidate.getAttribute('data-timestamp') || '',
-          candidate.getAttribute('data-time') || '',
-          candidate.getAttribute('aria-label') || '',
-          candidate.getAttribute('title') || '',
-          candidate.textContent || ''
-        ]))
-        .map((value) => cleanText(value))
-        .filter(Boolean);
-
-      const explicitValue = candidateValues.find((value) => looksLikeTimestamp(value));
-      if (explicitValue) {
-        return explicitValue;
-      }
-
-      return looksLikeTimestamp(metadata) ? metadata : '';
-    };
-
-    const messages = nodes.map((node) => {
-      const text = cleanText(
-        Array.from(node.querySelectorAll(payload.messageTextSelector))
-          .map((item) => cleanText(item.textContent || ''))
-          .filter(Boolean)
-          .join(' ')
-      );
-
-      if (!text) {
-        return null;
-      }
-
-      const metadata = collectMetadata(node);
-      return {
-        text,
-        direction: inferDirection(metadata),
-        managerName: extractManagerName(node, text, metadata),
-        timestampText: extractTimestampText(node, metadata)
+        return cleanText(
+          stackNode.querySelector(".im-info")?.getAttribute("title"),
+        );
       };
-    }).filter(Boolean);
 
-    const incomingMessages = messages
-      .filter((message) => message.direction === 'incoming')
-      .map((message) => message.text)
-      .slice(-payload.maxLastMessages);
+      const stackNodes = Array.from(historyNode.querySelectorAll(".im-stack"));
+      const messageTimeline = [];
+      const sourceBlocks = [];
 
-    return {
-      lastMessages: messages
-        .map((message) => message.text)
-        .slice(-payload.maxLastMessages),
-      lastIncomingCandidateMessages: incomingMessages,
-      incomingDetectionMode: incomingMessages.length ? 'heuristic_message_item' : 'fallback_all_messages',
-      messageTimeline: messages
-    };
-  }, {
-    incomingHints: INCOMING_HINTS,
-    outgoingHints: OUTGOING_HINTS,
-    managerNameSelectors: MANAGER_NAME_SELECTORS,
-    timestampSelectors: TIMESTAMP_SELECTORS,
-    maxLastMessages: config.maxLastMessages,
-    messageTextSelector: '.im-message-text-block .im-message__text'
-  });
+      for (const stackNode of stackNodes) {
+        const direction = stackNode.matches(".im-stack.im-stack-outgoing")
+          ? "outgoing"
+          : "incoming";
+        const authorName = cleanText(
+          stackNode.querySelector(".im-stack__info .im-stack__name")
+            ?.textContent || "",
+        );
+        const sourceText = cleanText(
+          stackNode.querySelector(".im-source-item")?.textContent || "",
+        );
+        const messageItems = Array.from(
+          stackNode.querySelectorAll(".im-stack__messages-item"),
+        );
 
-  let lastMessages = (messageSnapshot.lastMessages || []).map((item) => normalizeText(item)).filter(Boolean);
-  let lastIncomingCandidateMessages = (messageSnapshot.lastIncomingCandidateMessages || [])
+        if (sourceText) {
+          sourceBlocks.push(sourceText);
+        }
+
+        for (const itemNode of messageItems) {
+          const textSelector =
+            direction === "outgoing"
+              ? ".im-message.im-message_out .im-message__text"
+              : ".im-message .im-message__text";
+          const text = getJoinedText(itemNode, textSelector);
+
+          if (!text) {
+            continue;
+          }
+
+          messageTimeline.push({
+            direction,
+            managerName: direction === "outgoing" ? authorName : "",
+            authorName,
+            text,
+            timestampText: getTimestampText(itemNode, stackNode),
+            sourceText,
+          });
+        }
+      }
+
+      return {
+        sourceBlocks,
+        lastMessages: messageTimeline
+          .map((message) => message.text)
+          .slice(-payload.maxLastMessages),
+        lastIncomingCandidateMessages: messageTimeline
+          .filter((message) => message.direction === "incoming")
+          .map((message) => message.text)
+          .slice(-payload.maxLastMessages),
+        incomingDetectionMode: "stack_based",
+        messageTimeline,
+      };
+    },
+    {
+      maxLastMessages: config.maxLastMessages,
+    },
+  );
+
+  let lastMessages = (messageSnapshot.lastMessages || [])
     .map((item) => normalizeText(item))
     .filter(Boolean);
-  let incomingDetectionMode = messageSnapshot.incomingDetectionMode || 'fallback_all_messages';
+  let lastIncomingCandidateMessages = (
+    messageSnapshot.lastIncomingCandidateMessages || []
+  )
+    .map((item) => normalizeText(item))
+    .filter(Boolean);
+  let incomingDetectionMode =
+    messageSnapshot.incomingDetectionMode || "fallback_message_text_selector";
   let messageTimeline = Array.isArray(messageSnapshot.messageTimeline)
-    ? messageSnapshot.messageTimeline.map((message) => ({
-      direction: normalizeText(message.direction) || 'unknown',
-      managerName: normalizeText(message.managerName),
-      text: normalizeText(message.text),
-      timestampText: normalizeText(message.timestampText)
-    })).filter((message) => message.text)
+    ? messageSnapshot.messageTimeline
+        .map((message) => ({
+          direction: normalizeText(message.direction) || "unknown",
+          managerName: normalizeText(message.managerName),
+          authorName: normalizeText(message.authorName),
+          text: normalizeText(message.text),
+          timestampText: normalizeText(message.timestampText),
+          sourceText: normalizeText(message.sourceText),
+        }))
+        .filter((message) => message.text)
     : [];
 
-  if (!lastMessages.length) {
-    const fallbackMessages = await page.locator(selectors.chat.messageText).evaluateAll((nodes, maxLastMessages) => {
-      return nodes
-        .map((node) => (node.textContent || '').replace(/\s+/g, ' ').trim())
-        .filter(Boolean)
-        .slice(-maxLastMessages);
-    }, config.maxLastMessages);
+  if (!messageTimeline.length) {
+    const fallbackMessages = await page
+      .locator(selectors.chat.messageText)
+      .evaluateAll((nodes, maxLastMessages) => {
+        return nodes
+          .map((node) => (node.textContent || "").replace(/\s+/g, " ").trim())
+          .filter(Boolean)
+          .slice(-maxLastMessages);
+      }, config.maxLastMessages);
 
-    lastMessages = fallbackMessages.map((item) => normalizeText(item)).filter(Boolean);
+    lastMessages = fallbackMessages
+      .map((item) => normalizeText(item))
+      .filter(Boolean);
     lastIncomingCandidateMessages = [];
-    incomingDetectionMode = 'fallback_message_text_selector';
+    incomingDetectionMode = "fallback_message_text_selector";
     messageTimeline = lastMessages.map((text) => ({
-      direction: 'unknown',
-      managerName: '',
+      direction: "unknown",
+      managerName: "",
+      authorName: "",
       text,
-      timestampText: ''
+      timestampText: "",
+      sourceText: "",
     }));
   }
 
-  const sourceBlocks = await page.locator(selectors.chat.source).evaluateAll((nodes) => {
-    return nodes
-      .map((node) => (node.textContent || '').replace(/\s+/g, ' ').trim())
-      .filter(Boolean);
-  });
-
-  const acceptButtonDetected = (await page.locator(selectors.acceptButton).count()) > 0;
+  const sourceBlocks = uniqueNonEmpty([
+    ...(messageSnapshot.sourceBlocks || [])
+      .map((item) => normalizeText(item))
+      .filter(Boolean),
+    ...(await page.locator(selectors.chat.source).evaluateAll((nodes) => {
+      return nodes
+        .map((node) => (node.textContent || "").replace(/\s+/g, " ").trim())
+        .filter(Boolean);
+    })),
+  ]);
+  const acceptButtonDetected =
+    (await page.locator(selectors.acceptButton).count()) > 0;
 
   return {
-    sourceOpenChat: normalizeText(uniqueNonEmpty(sourceBlocks).join(' | ')),
+    sourceOpenChat: normalizeText(sourceBlocks.join(" | ")),
     lastMessages,
     lastIncomingCandidateMessages,
     incomingDetectionMode,
     messageTimeline,
-    acceptButtonDetected
+    acceptButtonDetected,
   };
 }
 
 module.exports = {
-  readOpenChat
+  readOpenChat,
 };

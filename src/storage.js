@@ -31,13 +31,14 @@ const DEFAULT_CONFIG = {
   brandWeights: {},
   modelWeights: {},
   sourceWeights: {},
-  shiftRules: {
+  ownershipIgnoredOutgoingPatterns: [],
+  ownershipRules: {
     enabled: false,
     timezone: "UTC",
-    dayShiftStartsAt: "10:00",
-    myShift: "day",
-    dayManagers: [],
-    nightManagers: [],
+    dayBoundaryTime: "10:00",
+    currentUserName: "",
+    assistantNames: [],
+    ownershipIgnoredOutgoingPatterns: [],
   },
 };
 
@@ -89,15 +90,51 @@ function mergeConfig(rawConfig) {
     ...(rawConfig?.sourceWeights || {}),
   };
 
-  normalizedConfig.shiftRules = {
-    ...DEFAULT_CONFIG.shiftRules,
+  normalizedConfig.ownershipIgnoredOutgoingPatterns = Array.isArray(
+    rawConfig?.ownershipIgnoredOutgoingPatterns,
+  )
+    ? rawConfig.ownershipIgnoredOutgoingPatterns
+    : DEFAULT_CONFIG.ownershipIgnoredOutgoingPatterns;
+
+  normalizedConfig.ownershipRules = {
+    ...DEFAULT_CONFIG.ownershipRules,
     ...(rawConfig?.shiftRules || {}),
-    dayManagers: Array.isArray(rawConfig?.shiftRules?.dayManagers)
-      ? rawConfig.shiftRules.dayManagers
-      : DEFAULT_CONFIG.shiftRules.dayManagers,
-    nightManagers: Array.isArray(rawConfig?.shiftRules?.nightManagers)
-      ? rawConfig.shiftRules.nightManagers
-      : DEFAULT_CONFIG.shiftRules.nightManagers,
+    ...(rawConfig?.ownershipRules || {}),
+    dayBoundaryTime:
+      typeof rawConfig?.ownershipRules?.dayBoundaryTime === "string"
+        ? rawConfig.ownershipRules.dayBoundaryTime
+        : typeof rawConfig?.ownershipRules?.dayShiftStartsAt === "string"
+          ? rawConfig.ownershipRules.dayShiftStartsAt
+          : typeof rawConfig?.shiftRules?.dayBoundaryTime === "string"
+            ? rawConfig.shiftRules.dayBoundaryTime
+            : typeof rawConfig?.shiftRules?.dayShiftStartsAt === "string"
+              ? rawConfig.shiftRules.dayShiftStartsAt
+              : DEFAULT_CONFIG.ownershipRules.dayBoundaryTime,
+    currentUserName:
+      typeof rawConfig?.ownershipRules?.currentUserName === "string"
+        ? rawConfig.ownershipRules.currentUserName
+        : typeof rawConfig?.shiftRules?.currentUserName === "string"
+          ? rawConfig.shiftRules.currentUserName
+          : DEFAULT_CONFIG.ownershipRules.currentUserName,
+    assistantNames: Array.isArray(rawConfig?.ownershipRules?.assistantNames)
+      ? rawConfig.ownershipRules.assistantNames
+      : Array.isArray(rawConfig?.shiftRules?.assistantNames)
+        ? rawConfig.shiftRules.assistantNames
+        : DEFAULT_CONFIG.ownershipRules.assistantNames,
+    ownershipIgnoredOutgoingPatterns: Array.isArray(
+      rawConfig?.ownershipRules?.ownershipIgnoredOutgoingPatterns,
+    )
+      ? rawConfig.ownershipRules.ownershipIgnoredOutgoingPatterns
+      : normalizedConfig.ownershipIgnoredOutgoingPatterns,
+  };
+
+  normalizedConfig.shiftRules = {
+    ...normalizedConfig.ownershipRules,
+    dayShiftStartsAt: normalizedConfig.ownershipRules.dayBoundaryTime,
+    assistantNames: [...normalizedConfig.ownershipRules.assistantNames],
+    ownershipIgnoredOutgoingPatterns: [
+      ...normalizedConfig.ownershipRules.ownershipIgnoredOutgoingPatterns,
+    ],
   };
 
   return normalizedConfig;

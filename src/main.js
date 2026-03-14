@@ -29,6 +29,16 @@ const CONFIG_PATH = "config/config.json";
 const SEEN_PATH = "data/seen.json";
 const LOG_PATH = "logs/log.txt";
 
+function createOwnershipBypassAssessment() {
+  return {
+    finalScore: null,
+    scoringMessageBasis: "ownership_rule_bypass",
+    scoringMessagesUsed: [],
+    sourceModifierApplied: false,
+    finalHits: [],
+  };
+}
+
 async function bootstrapBrowser(config, logger) {
   const userDataDir = resolveProjectPath(ROOT_DIR, config.browserUserDataDir);
   await logger.info("Launching persistent browser profile", {
@@ -93,10 +103,14 @@ async function processDeal({ deal, page, state, config, logger, seenSet }) {
       preliminaryHits: preliminary.preliminaryHits,
       finalHits: preliminary.preliminaryHits,
       acceptButtonDetected: false,
+      ownershipDecision: "NOT_CHECKED_PRELIMINARY_SKIP",
+      ownershipReason: "not_checked_preliminary_skip",
       eligibilityAllowed: true,
       eligibilityReason: "not_checked_preliminary_skip",
       matchedManager: "",
       matchedTimestamp: "",
+      lastOutgoingManagerMessage: null,
+      scoringBypassed: false,
       sourceModifierApplied: preliminary.sourceModifierApplied,
       note: "Skipped by preliminary score and explicit negative keywords",
     });
@@ -124,10 +138,14 @@ async function processDeal({ deal, page, state, config, logger, seenSet }) {
       preliminaryHits: preliminary.preliminaryHits,
       finalHits: preliminary.preliminaryHits,
       acceptButtonDetected: false,
+      ownershipDecision: "NOT_CHECKED_PRELIMINARY_SKIP",
+      ownershipReason: "not_checked_preliminary_skip",
       eligibilityAllowed: true,
       eligibilityReason: "not_checked_preliminary_skip",
       matchedManager: "",
       matchedTimestamp: "",
+      lastOutgoingManagerMessage: null,
+      scoringBypassed: false,
       sourceModifierApplied: preliminary.sourceModifierApplied,
       note: "Low preliminary score, chat open was not needed",
     });
@@ -148,34 +166,62 @@ async function processDeal({ deal, page, state, config, logger, seenSet }) {
 
   increment(state, "opened");
   const chatSnapshot = await readOpenChat(page, logger, config);
-  const finalAssessment = buildFinalAssessment(
-    deal,
-    chatSnapshot,
-    config,
-    preliminary,
-  );
   const eligibility = evaluateChatEligibility(
     chatSnapshot.messageTimeline,
-    config.shiftRules,
+    config.ownershipRules,
   );
-  const effectiveDecision = eligibility.allowed
-    ? finalAssessment.decision
-    : "BLOCK_BY_SHIFT_RULE";
+  const ownershipDecision = eligibility.ownershipDecision || "ALLOW_NORMAL";
 
-  if (effectiveDecision === "ACCEPT_CANDIDATE") {
+  let finalAssessment = createOwnershipBypassAssessment();
+  let effectiveDecision = "";
+  let scoringBypassed = false;
+  let note = "";
+
+  if (ownershipDecision === "ALLOW_FORCE_SELF") {
+    scoringBypassed = true;
+    effectiveDecision = "FORCE_ACCEPT_SELF_CHAT";
+    note =
+      "Force-accepted by ownership rule because the latest outgoing message after boundary belongs to current user";
+  } else if (ownershipDecision === "BLOCK_BY_OWNER_RULE") {
+    scoringBypassed = true;
+    effectiveDecision = "BLOCK_BY_OWNER_RULE";
+    note =
+      "Blocked by ownership rule because the latest outgoing message after boundary belongs to another manager";
+  } else {
+    finalAssessment = buildFinalAssessment(
+      deal,
+      chatSnapshot,
+      config,
+      preliminary,
+    );
+    effectiveDecision = finalAssessment.decision;
+    note = chatSnapshot.acceptButtonDetected
+      ? "Accept button detected but intentionally not clicked in dry-run diagnostics"
+      : "Accept button not detected";
+  }
+
+  if (
+    effectiveDecision === "ACCEPT_CANDIDATE" ||
+    effectiveDecision === "FORCE_ACCEPT_SELF_CHAT"
+  ) {
     increment(state, "acceptedCandidates");
   } else if (effectiveDecision === "SKIP_STRONG_NEGATIVE") {
     increment(state, "strongNegativeSkipped");
   } else if (
     effectiveDecision === "SKIP" ||
-    effectiveDecision === "BLOCK_BY_SHIFT_RULE"
+    effectiveDecision === "BLOCK_BY_OWNER_RULE"
   ) {
     increment(state, "skipped");
   }
 
+  const scoreSuffix =
+    finalAssessment.finalScore === null ||
+    finalAssessment.finalScore === undefined
+      ? ""
+      : ` (${finalAssessment.finalScore})`;
   setLastAction(
     state,
-    `${effectiveDecision} ${deal.userName || deal.dealId} (${finalAssessment.finalScore})`,
+    `${effectiveDecision} ${deal.userName || deal.dealId}${scoreSuffix}`,
   );
 
   await logger.logDecision({
@@ -198,16 +244,16 @@ async function processDeal({ deal, page, state, config, logger, seenSet }) {
     preliminaryHits: preliminary.preliminaryHits,
     finalHits: finalAssessment.finalHits,
     acceptButtonDetected: chatSnapshot.acceptButtonDetected,
+    ownershipDecision,
+    ownershipReason: eligibility.reason,
     eligibilityAllowed: eligibility.allowed,
     eligibilityReason: eligibility.reason,
     matchedManager: eligibility.matchedManager,
     matchedTimestamp: eligibility.matchedTimestamp,
+    lastOutgoingManagerMessage: eligibility.lastOutgoingMessage,
+    scoringBypassed,
     sourceModifierApplied: finalAssessment.sourceModifierApplied,
-    note: !eligibility.allowed
-      ? `Blocked by shift rule: ${eligibility.reason}`
-      : chatSnapshot.acceptButtonDetected
-        ? "Accept button detected but intentionally not clicked in dry-run diagnostics"
-        : "Accept button not detected",
+    note,
   });
 
   seenSet.add(deal.dealId);
