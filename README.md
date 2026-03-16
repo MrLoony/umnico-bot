@@ -9,6 +9,7 @@
 - читает последние сообщения
 - сначала проверяет ownership rule по последнему исходящему сообщению менеджера
 - считает score релевантности только если ownership rule разрешает обычный scoring pipeline
+- отправляет часть слабых `SKIP`-чатов в `watchlist` для повторной оценки по cooldown
 - пишет решение в консоль и `logs/log.txt`
 - никогда не нажимает `#messaging-accept-dialog`
 
@@ -19,6 +20,7 @@ package.json
 README.md
 config/config.json
 data/seen.json
+data/watchlist.json
 logs/log.txt
 src/main.js
 src/state.js
@@ -28,6 +30,7 @@ src/filter.js
 src/chatReader.js
 src/logger.js
 src/storage.js
+src/watchlist.js
 src/controls.js
 src/utils.js
 ```
@@ -95,6 +98,10 @@ npm start
 - `lastOutgoingManagerMessage`
 - `scoringBypassed`
 - `acceptButtonDetected`
+- `watchlistStatus`
+- `watchReason`
+- `recheckAfterSeconds`
+- `retryCount`
 - scoring breakdown
 
 ## Ownership rules
@@ -122,6 +129,37 @@ npm start
 - `ALLOW_FORCE_SELF`: последнее исходящее сообщение после boundary принадлежит `currentUserName`, поэтому чат помечается как мой и scoring bypassed.
 - `BLOCK_BY_OWNER_RULE`: последнее исходящее сообщение после boundary принадлежит другому менеджеру, поэтому scoring bypassed и чат блокируется.
 
+## Watchlist
+
+В `config/config.json` есть блок:
+
+```json
+{
+  "watchlist": {
+    "enabled": true,
+    "cooldownSeconds": 90,
+    "ttlMinutes": 180,
+    "maxRetries": 8
+  }
+}
+```
+
+- `watchlist` хранится отдельно в `data/watchlist.json`.
+- `seen.json` содержит финально обработанные чаты.
+- `watchlist.json` содержит слабые, но потенциально перспективные `SKIP`-чаты, которые надо пересмотреть позже.
+- чат из `watchlist` повторно проверяется только если изменился `previewText`, изменился `timeText` или прошёл `cooldownSeconds`.
+- если `expiresAt` истёк или превышен `maxRetries`, чат переводится в обычный финальный `SKIP`, удаляется из `watchlist` и попадает в `seen.json`.
+
+Типичные `WATCH_RECHECK`-кейсы:
+- `hello`
+- `hi`
+- `good afternoon`
+- `добрый день`
+- `??`
+- `can i call`
+- `available?`
+- `price?`
+
 ## Как работает scoring
 
 Scoring построен на сумме весов из `config/config.json`:
@@ -146,6 +184,7 @@ Scoring построен на сумме весов из `config/config.json`:
    - `BLOCK_BY_OWNER_RULE`
    - `ACCEPT_CANDIDATE`
    - `OPEN_CHECK`
+   - `WATCH_RECHECK`
    - `SKIP`
    - `SKIP_STRONG_NEGATIVE`
 
@@ -181,6 +220,7 @@ Scoring построен на сумме весов из `config/config.json`:
 - координатные клики не используются
 - чтение идёт только через DOM Playwright и заданные селекторы
 - `seen.json` автоматически не очищается
+- `watchlist.json` автоматически создаётся и очищается только по TTL / retry policy
 - временное отсутствие селектора логируется, но не валит весь цикл
 - ошибка на одном чате не останавливает следующий
 
@@ -188,16 +228,19 @@ Scoring построен на сумме весов из `config/config.json`:
 
 1. Раз в `pollIntervalMs` считываются все `a.deals-row`.
 2. Из каждой строки извлекаются `href`, `userName`, `previewText`, `sourcePreview`, `timeText`.
-3. Уже обработанные `href` из `data/seen.json` пропускаются.
-4. Считается preliminary score.
-5. При необходимости бот открывает диалог.
-6. После открытия ждёт `.im-history`.
-7. Строит `messageTimeline` по `.im-stack` и определяет `incoming/outgoing` только по классу stack.
-8. Считывает источник по `.im-source-item`.
-9. Проверяет ownership rule по последнему `outgoing` сообщению менеджера.
-10. Если ownership result = `ALLOW_NORMAL`, считает final score; если `ALLOW_FORCE_SELF` или `BLOCK_BY_OWNER_RULE`, scoring bypassed.
-11. Пишет решение в статусную консоль и в `logs/log.txt`.
-12. Добавляет `dealId` в `data/seen.json`.
+3. Уже обработанные `href` из `data/seen.json` пропускаются сразу.
+4. Для `watchlist`-чатов сначала проверяется expiration policy, затем cooldown/change policy.
+5. Если `watchlist`-чат не изменился и cooldown ещё не прошёл, он не переобрабатывается в этом цикле.
+6. Считается preliminary score.
+7. При необходимости бот открывает диалог.
+8. После открытия ждёт `.im-history`.
+9. Строит `messageTimeline` по `.im-stack` и определяет `incoming/outgoing` только по классу stack.
+10. Считывает источник по `.im-source-item`.
+11. Проверяет ownership rule по последнему `outgoing` сообщению менеджера.
+12. Если ownership result = `ALLOW_NORMAL`, считает final score; если `ALLOW_FORCE_SELF` или `BLOCK_BY_OWNER_RULE`, scoring bypassed.
+13. Если итоговый `SKIP` попадает под watchlist-heuristics, бот пишет `WATCH_RECHECK` и обновляет `data/watchlist.json`.
+14. Иначе пишет финальное решение в статусную консоль и в `logs/log.txt`.
+15. Финальные решения попадают в `data/seen.json`, а `WATCH_RECHECK` туда не добавляется.
 
 ## Проверка синтаксиса
 

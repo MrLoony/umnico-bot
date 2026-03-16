@@ -25,11 +25,21 @@ function createLogger({ logPath, onEvent }) {
     const record = {
       kind: "decision",
       timestamp: payload.timestamp || nowIso(),
+      watchlistStatus: payload.watchlistStatus || "",
+      watchReason: payload.watchReason || "",
+      recheckAfterSeconds:
+        payload.recheckAfterSeconds === undefined
+          ? null
+          : payload.recheckAfterSeconds,
+      retryCount: payload.retryCount === undefined ? null : payload.retryCount,
       ...payload,
     };
 
     const scoreLabel = record.scoringBypassed ? "bypassed" : record.finalScore;
-    const summary = `${record.decision} ${record.userName || "Unknown"} score=${scoreLabel} ${record.dealId}`;
+    const watchSummary = record.watchlistStatus
+      ? ` watch=${record.watchlistStatus}`
+      : "";
+    const summary = `${record.decision} ${record.userName || "Unknown"} score=${scoreLabel} ${record.dealId}${watchSummary}`;
     onEvent?.(summary);
     await appendRecord(record);
   }

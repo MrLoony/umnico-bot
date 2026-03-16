@@ -15,6 +15,13 @@
   "openCheckThreshold": 2,
   "strongNegativeThreshold": -4,
 
+  "watchlist": {
+    "enabled": true,
+    "cooldownSeconds": 90,
+    "ttlMinutes": 180,
+    "maxRetries": 8
+  },
+
   "includeKeywords": {
     "rent": 3,
     "rental": 3,
@@ -27,9 +34,9 @@
     "available for": 2,
     "today": 2,
     "tomorrow": 2,
-    "monthly": 5,
-    "for one month": 5,
-    "month": 5,
+    "monthly": 4,
+    "for one month": 4,
+    "month": 2,
     "car": 1,
     "list": 1,
     "let`s": 1,
@@ -45,6 +52,13 @@
     "one week": 3,
     "for a week": 3,
     "week": 1,
+    "for 15 days": 4,
+    "15 days": 3,
+    "days": 1,
+    "на 15 дней": 4,
+    "на 1 день": 3,
+    "1 день": 2,
+
     "share all cars": 4,
     "all cars": 3,
     "what car": 2,
@@ -54,6 +68,27 @@
     "can i call": 3,
     "availability": 3,
     "disponibility": 3,
+
+    "delivery": 3,
+    "car delivery": 4,
+    "status of car delivery": 5,
+    "delivery status": 4,
+    "доставка": 3,
+    "статус доставки": 4,
+
+    "extend": 3,
+    "extension": 3,
+    "extend rental": 4,
+    "rental extension": 4,
+    "продлить": 4,
+    "продлите": 4,
+    "продление": 4,
+
+    "replacement": 3,
+    "replace": 2,
+    "замена": 3,
+    "машина будет готова": 3,
+    "готова": 1,
 
     "i'd like to rent this car": 8,
     "my promo code to receive personal offer": 3,
@@ -266,7 +301,12 @@
   "excludeWeights": {
     "dear client": -8,
     "thank you for renting": -8,
+    "thank you for renting a car with us": -8,
     "complete a survey": -7,
+    "we kindly ask you to complete a survey": -8,
+    "token of our appreciation": -7,
+    "discount will be valid until": -6,
+    "feedback-cars.typeform.com": -8,
     "best regards": -6,
     "please let us know which car you need": -7,
     "thank you for choosing us": -6,
@@ -295,7 +335,13 @@
     "which car would you like to book and for which dates please",
     "hello 😌which car would you like to book and for which dates please",
     "hello, thank you for contacting octane luxury car rental",
-    "what car and for which dates are you interested please?"
+    "what car and for which dates are you interested please?",
+    "thank you for renting a car with us",
+    "we kindly ask you to complete a survey",
+    "token of our appreciation",
+    "your promo code",
+    "discount will be valid until",
+    "feedback-cars.typeform.com"
   ],
 
   "ownershipRules": {

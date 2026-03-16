@@ -5,7 +5,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "node src/main.js",
-    "check": "node --check src/main.js && node --check src/state.js && node --check src/selectors.js && node --check src/scanner.js && node --check src/filter.js && node --check src/chatReader.js && node --check src/logger.js && node --check src/storage.js && node --check src/controls.js && node --check src/utils.js"
+    "check": "node --check src/main.js && node --check src/state.js && node --check src/selectors.js && node --check src/scanner.js && node --check src/filter.js && node --check src/chatReader.js && node --check src/logger.js && node --check src/storage.js && node --check src/controls.js && node --check src/utils.js && node --check src/watchlist.js"
   },
   "author": "",
   "license": "ISC",

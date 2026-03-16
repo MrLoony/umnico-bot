@@ -40,6 +40,12 @@ const DEFAULT_CONFIG = {
     assistantNames: [],
     ownershipIgnoredOutgoingPatterns: [],
   },
+  watchlist: {
+    enabled: true,
+    cooldownSeconds: 90,
+    ttlMinutes: 180,
+    maxRetries: 8,
+  },
 };
 
 function mergeConfig(rawConfig) {
@@ -137,6 +143,26 @@ function mergeConfig(rawConfig) {
     ],
   };
 
+  normalizedConfig.watchlist = {
+    ...DEFAULT_CONFIG.watchlist,
+    ...(rawConfig?.watchlist || {}),
+    enabled:
+      typeof rawConfig?.watchlist?.enabled === "boolean"
+        ? rawConfig.watchlist.enabled
+        : DEFAULT_CONFIG.watchlist.enabled,
+    cooldownSeconds: Number.isFinite(
+      Number(rawConfig?.watchlist?.cooldownSeconds),
+    )
+      ? Number(rawConfig.watchlist.cooldownSeconds)
+      : DEFAULT_CONFIG.watchlist.cooldownSeconds,
+    ttlMinutes: Number.isFinite(Number(rawConfig?.watchlist?.ttlMinutes))
+      ? Number(rawConfig.watchlist.ttlMinutes)
+      : DEFAULT_CONFIG.watchlist.ttlMinutes,
+    maxRetries: Number.isFinite(Number(rawConfig?.watchlist?.maxRetries))
+      ? Number(rawConfig.watchlist.maxRetries)
+      : DEFAULT_CONFIG.watchlist.maxRetries,
+  };
+
   return normalizedConfig;
 }
 
@@ -152,11 +178,17 @@ async function ensureProjectFiles(rootDir) {
   ]);
 
   const seenPath = path.join(dataDir, "seen.json");
+  const watchlistPath = path.join(dataDir, "watchlist.json");
   const logPath = path.join(logsDir, "log.txt");
 
   const seenExists = await fileExists(seenPath);
   if (!seenExists) {
     await writeJson(seenPath, []);
+  }
+
+  const watchlistExists = await fileExists(watchlistPath);
+  if (!watchlistExists) {
+    await writeJson(watchlistPath, {});
   }
 
   const logExists = await fileExists(logPath);
@@ -194,9 +226,62 @@ async function saveSeenSet(rootDir, seenPath, seenSet) {
   await writeJson(absolutePath, Array.from(seenSet));
 }
 
+function isObjectRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function normalizeWatchlist(rawValue) {
+  if (!isObjectRecord(rawValue)) {
+    return {};
+  }
+
+  const normalizedEntries = {};
+  for (const [dealId, entry] of Object.entries(rawValue)) {
+    if (
+      typeof dealId !== "string" ||
+      !dealId.trim() ||
+      !isObjectRecord(entry)
+    ) {
+      continue;
+    }
+
+    normalizedEntries[dealId] = {
+      status: typeof entry.status === "string" ? entry.status : "watch",
+      firstSeenAt:
+        typeof entry.firstSeenAt === "string" ? entry.firstSeenAt : "",
+      lastCheckedAt:
+        typeof entry.lastCheckedAt === "string" ? entry.lastCheckedAt : "",
+      lastPreviewText:
+        typeof entry.lastPreviewText === "string" ? entry.lastPreviewText : "",
+      lastTimeText:
+        typeof entry.lastTimeText === "string" ? entry.lastTimeText : "",
+      retryCount: Number.isFinite(Number(entry.retryCount))
+        ? Number(entry.retryCount)
+        : 0,
+      expiresAt: typeof entry.expiresAt === "string" ? entry.expiresAt : "",
+      reason: typeof entry.reason === "string" ? entry.reason : "",
+    };
+  }
+
+  return normalizedEntries;
+}
+
+async function loadWatchlist(rootDir, watchlistPath) {
+  const absolutePath = resolveProjectPath(rootDir, watchlistPath);
+  const rawValue = await readJson(absolutePath, {});
+  return normalizeWatchlist(rawValue);
+}
+
+async function saveWatchlist(rootDir, watchlistPath, watchlist) {
+  const absolutePath = resolveProjectPath(rootDir, watchlistPath);
+  await writeJson(absolutePath, normalizeWatchlist(watchlist));
+}
+
 module.exports = {
   ensureProjectFiles,
   loadConfig,
   loadSeenSet,
+  loadWatchlist,
   saveSeenSet,
+  saveWatchlist,
 };

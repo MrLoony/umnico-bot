@@ -2,5 +2,3 @@ node_modules/
 data/browser-profile/
 logs/
 *.log
-seen.json
-log copy.txt

@@ -20,23 +20,368 @@ const {
   ensureProjectFiles,
   loadConfig,
   loadSeenSet,
+  loadWatchlist,
   saveSeenSet,
+  saveWatchlist,
 } = require("./storage");
 const { nowIso, resolveProjectPath, sleep, truncate } = require("./utils");
+const {
+  buildWatchlistEntry,
+  getWatchDecisionContext,
+  isWatchlistEntryExpired,
+  shouldRecheckWatchEntry,
+} = require("./watchlist");
 
 const ROOT_DIR = path.resolve(__dirname, "..");
 const CONFIG_PATH = "config/config.json";
 const SEEN_PATH = "data/seen.json";
+const WATCHLIST_PATH = "data/watchlist.json";
 const LOG_PATH = "logs/log.txt";
+const WATCH_DECISION = "WATCH_RECHECK";
+const WATCHLIST_EXPIRED_REASON = "watchlist_expired";
+const PRELIMINARY_SKIP_OWNERSHIP_DECISION = "NOT_CHECKED_PRELIMINARY_SKIP";
+const PRELIMINARY_SKIP_OWNERSHIP_REASON = "not_checked_preliminary_skip";
 
 function createOwnershipBypassAssessment() {
   return {
+    decision: "",
     finalScore: null,
     scoringMessageBasis: "ownership_rule_bypass",
     scoringMessagesUsed: [],
     sourceModifierApplied: false,
     finalHits: [],
   };
+}
+
+function createPreliminaryFinalAssessment(preliminary, decision) {
+  return {
+    decision,
+    finalScore: preliminary.preliminaryScore,
+    scoringMessageBasis: "preview_only",
+    scoringMessagesUsed: [],
+    sourceModifierApplied: preliminary.sourceModifierApplied,
+    finalHits: preliminary.preliminaryHits,
+  };
+}
+
+function createEmptyChatSnapshot() {
+  return {
+    sourceOpenChat: "",
+    lastMessages: [],
+    lastIncomingCandidateMessages: [],
+    incomingDetectionMode: "not_opened",
+    messageTimeline: [],
+    acceptButtonDetected: false,
+  };
+}
+
+function createEligibilityStub({
+  ownershipDecision = PRELIMINARY_SKIP_OWNERSHIP_DECISION,
+  reason = PRELIMINARY_SKIP_OWNERSHIP_REASON,
+  allowed = true,
+} = {}) {
+  return {
+    allowed,
+    reason,
+    ownershipDecision,
+    matchedManager: "",
+    matchedTimestamp: "",
+    lastOutgoingMessage: null,
+  };
+}
+
+function createExpirationAssessments() {
+  return {
+    preliminary: {
+      decision: "SKIP",
+      preliminaryScore: null,
+      preliminaryHits: [],
+      sourceModifierApplied: false,
+      shouldOpen: false,
+    },
+    finalAssessment: {
+      decision: "SKIP",
+      finalScore: null,
+      scoringMessageBasis: "watchlist_expired",
+      scoringMessagesUsed: [],
+      sourceModifierApplied: false,
+      finalHits: [],
+    },
+  };
+}
+
+function getScoreSuffix(finalAssessment) {
+  return finalAssessment.finalScore === null ||
+    finalAssessment.finalScore === undefined
+    ? ""
+    : ` (${finalAssessment.finalScore})`;
+}
+
+function buildDecisionLogPayload({
+  deal,
+  config,
+  preliminary,
+  finalAssessment,
+  chatSnapshot,
+  eligibility,
+  decision,
+  scoringBypassed,
+  note,
+  watchlistStatus = "",
+  watchReason = "",
+  recheckAfterSeconds = null,
+  retryCount = null,
+}) {
+  const ownershipDecision =
+    eligibility?.ownershipDecision || PRELIMINARY_SKIP_OWNERSHIP_DECISION;
+
+  return {
+    timestamp: nowIso(),
+    dryRun: config.dryRun,
+    dealId: deal.dealId,
+    userName: deal.userName || "",
+    previewText: deal.previewText || "",
+    sourcePreview: deal.sourcePreview || "",
+    sourceOpenChat: chatSnapshot.sourceOpenChat,
+    timeText: deal.timeText || "",
+    lastMessages: chatSnapshot.lastMessages,
+    lastIncomingCandidateMessages: chatSnapshot.lastIncomingCandidateMessages,
+    incomingDetectionMode: chatSnapshot.incomingDetectionMode,
+    scoringMessageBasis: finalAssessment.scoringMessageBasis,
+    scoringMessagesUsed: finalAssessment.scoringMessagesUsed,
+    preliminaryScore: preliminary.preliminaryScore,
+    finalScore: finalAssessment.finalScore,
+    decision,
+    preliminaryHits: preliminary.preliminaryHits,
+    finalHits: finalAssessment.finalHits,
+    acceptButtonDetected: chatSnapshot.acceptButtonDetected,
+    ownershipDecision,
+    ownershipReason: eligibility.reason,
+    eligibilityAllowed: eligibility.allowed,
+    eligibilityReason: eligibility.reason,
+    matchedManager: eligibility.matchedManager,
+    matchedTimestamp: eligibility.matchedTimestamp,
+    lastOutgoingManagerMessage: eligibility.lastOutgoingMessage,
+    scoringBypassed,
+    sourceModifierApplied: finalAssessment.sourceModifierApplied,
+    note,
+    watchlistStatus,
+    watchReason,
+    recheckAfterSeconds,
+    retryCount,
+  };
+}
+
+function updateStateForDecision(state, decision) {
+  if (
+    decision === "ACCEPT_CANDIDATE" ||
+    decision === "FORCE_ACCEPT_SELF_CHAT"
+  ) {
+    increment(state, "acceptedCandidates");
+    return;
+  }
+
+  if (decision === "SKIP_STRONG_NEGATIVE") {
+    increment(state, "strongNegativeSkipped");
+    return;
+  }
+
+  if (decision === "SKIP" || decision === "BLOCK_BY_OWNER_RULE") {
+    increment(state, "skipped");
+  }
+}
+
+async function markDealProcessed(dealId, seenSet, watchlist) {
+  const hadWatchlistEntry = Object.prototype.hasOwnProperty.call(
+    watchlist,
+    dealId,
+  );
+
+  seenSet.add(dealId);
+  if (hadWatchlistEntry) {
+    delete watchlist[dealId];
+  }
+
+  await saveSeenSet(ROOT_DIR, SEEN_PATH, seenSet);
+  if (hadWatchlistEntry) {
+    await saveWatchlist(ROOT_DIR, WATCHLIST_PATH, watchlist);
+  }
+}
+
+async function scheduleDealWatch(dealId, watchlist, entry) {
+  watchlist[dealId] = entry;
+  await saveWatchlist(ROOT_DIR, WATCHLIST_PATH, watchlist);
+}
+
+async function commitDecision({
+  deal,
+  state,
+  config,
+  logger,
+  seenSet,
+  watchlist,
+  preliminary,
+  finalAssessment,
+  chatSnapshot,
+  eligibility,
+  decision,
+  scoringBypassed,
+  note,
+}) {
+  let effectiveDecision = decision;
+  let effectiveNote = note;
+  let watchlistStatus = "";
+  let watchReason = "";
+  let recheckAfterSeconds = null;
+  let retryCount = null;
+  let watchlistEntry = null;
+
+  if (decision === "SKIP" && config.watchlist.enabled) {
+    const watchContext = getWatchDecisionContext(
+      deal,
+      preliminary,
+      chatSnapshot,
+      { ...finalAssessment, decision },
+      eligibility,
+    );
+
+    if (watchContext.shouldWatch) {
+      const existingEntry = watchlist[deal.dealId];
+      const nextRetryCount = Number(existingEntry?.retryCount || 0) + 1;
+
+      if (nextRetryCount > config.watchlist.maxRetries) {
+        watchlistStatus = "expired";
+        watchReason = WATCHLIST_EXPIRED_REASON;
+        retryCount = Number(existingEntry?.retryCount || 0);
+        effectiveNote =
+          "Watchlist entry expired after reaching the retry limit";
+      } else {
+        effectiveDecision = WATCH_DECISION;
+        watchlistEntry = buildWatchlistEntry({
+          existingEntry,
+          deal,
+          now: new Date(),
+          ttlMinutes: config.watchlist.ttlMinutes,
+          reason: watchContext.reason,
+        });
+        watchlistStatus = "scheduled";
+        watchReason = watchContext.reason;
+        recheckAfterSeconds = config.watchlist.cooldownSeconds;
+        retryCount = watchlistEntry.retryCount;
+        effectiveNote =
+          "Weak greeting-like chat was scheduled for cooldown-based recheck";
+      }
+    }
+  }
+
+  updateStateForDecision(state, effectiveDecision);
+  setLastAction(
+    state,
+    `${effectiveDecision} ${deal.userName || deal.dealId}${getScoreSuffix(finalAssessment)}`,
+  );
+
+  await logger.logDecision(
+    buildDecisionLogPayload({
+      deal,
+      config,
+      preliminary,
+      finalAssessment,
+      chatSnapshot,
+      eligibility,
+      decision: effectiveDecision,
+      scoringBypassed,
+      note: effectiveNote,
+      watchlistStatus,
+      watchReason,
+      recheckAfterSeconds,
+      retryCount,
+    }),
+  );
+
+  if (effectiveDecision === WATCH_DECISION) {
+    await scheduleDealWatch(deal.dealId, watchlist, watchlistEntry);
+    return;
+  }
+
+  await markDealProcessed(deal.dealId, seenSet, watchlist);
+}
+
+async function expireWatchlistEntry({
+  dealId,
+  entry,
+  visibleDeal,
+  state,
+  config,
+  logger,
+  seenSet,
+  watchlist,
+}) {
+  const deal = {
+    dealId,
+    userName: visibleDeal?.userName || "",
+    previewText: visibleDeal?.previewText || entry?.lastPreviewText || "",
+    sourcePreview: visibleDeal?.sourcePreview || "",
+    timeText: visibleDeal?.timeText || entry?.lastTimeText || "",
+  };
+  const { preliminary, finalAssessment } = createExpirationAssessments();
+
+  updateStateForDecision(state, "SKIP");
+  setLastAction(
+    state,
+    `SKIP ${deal.userName || deal.dealId} (watchlist expired)`,
+  );
+
+  await logger.logDecision(
+    buildDecisionLogPayload({
+      deal,
+      config,
+      preliminary,
+      finalAssessment,
+      chatSnapshot: createEmptyChatSnapshot(),
+      eligibility: createEligibilityStub({
+        ownershipDecision: "WATCHLIST_EXPIRED",
+        reason: WATCHLIST_EXPIRED_REASON,
+      }),
+      decision: "SKIP",
+      scoringBypassed: false,
+      note: "Watchlist entry expired before a stronger lead signal arrived",
+      watchlistStatus: "expired",
+      watchReason: WATCHLIST_EXPIRED_REASON,
+      recheckAfterSeconds: 0,
+      retryCount: Number(entry?.retryCount || 0),
+    }),
+  );
+
+  await markDealProcessed(dealId, seenSet, watchlist);
+}
+
+async function expireWatchlistEntries({
+  visibleDealsById,
+  state,
+  config,
+  logger,
+  seenSet,
+  watchlist,
+}) {
+  const now = new Date();
+
+  for (const [dealId, entry] of Object.entries(watchlist)) {
+    const expirationState = isWatchlistEntryExpired(entry, config.watchlist, now);
+    if (!expirationState.expiredByTime && !expirationState.expiredByRetries) {
+      continue;
+    }
+
+    await expireWatchlistEntry({
+      dealId,
+      entry,
+      visibleDeal: visibleDealsById.get(dealId),
+      state,
+      config,
+      logger,
+      seenSet,
+      watchlist,
+    });
+  }
 }
 
 async function bootstrapBrowser(config, logger) {
@@ -78,79 +423,58 @@ async function bootstrapBrowser(config, logger) {
   return { context, page };
 }
 
-async function processDeal({ deal, page, state, config, logger, seenSet }) {
+async function processDeal({
+  deal,
+  page,
+  state,
+  config,
+  logger,
+  seenSet,
+  watchlist,
+}) {
   increment(state, "checked");
   setLastAction(state, `Scoring ${deal.userName || deal.dealId}`);
 
   const preliminary = buildPreliminaryAssessment(deal, config);
 
   if (preliminary.decision === "SKIP_STRONG_NEGATIVE") {
-    increment(state, "strongNegativeSkipped");
-    await logger.logDecision({
-      timestamp: nowIso(),
-      dryRun: config.dryRun,
-      dealId: deal.dealId,
-      userName: deal.userName,
-      previewText: deal.previewText,
-      sourcePreview: deal.sourcePreview,
-      sourceOpenChat: "",
-      timeText: deal.timeText,
-      lastMessages: [],
-      lastIncomingCandidateMessages: [],
-      preliminaryScore: preliminary.preliminaryScore,
-      finalScore: preliminary.preliminaryScore,
+    await commitDecision({
+      deal,
+      state,
+      config,
+      logger,
+      seenSet,
+      watchlist,
+      preliminary,
+      finalAssessment: createPreliminaryFinalAssessment(
+        preliminary,
+        "SKIP_STRONG_NEGATIVE",
+      ),
+      chatSnapshot: createEmptyChatSnapshot(),
+      eligibility: createEligibilityStub(),
       decision: "SKIP_STRONG_NEGATIVE",
-      preliminaryHits: preliminary.preliminaryHits,
-      finalHits: preliminary.preliminaryHits,
-      acceptButtonDetected: false,
-      ownershipDecision: "NOT_CHECKED_PRELIMINARY_SKIP",
-      ownershipReason: "not_checked_preliminary_skip",
-      eligibilityAllowed: true,
-      eligibilityReason: "not_checked_preliminary_skip",
-      matchedManager: "",
-      matchedTimestamp: "",
-      lastOutgoingManagerMessage: null,
       scoringBypassed: false,
-      sourceModifierApplied: preliminary.sourceModifierApplied,
       note: "Skipped by preliminary score and explicit negative keywords",
     });
-    seenSet.add(deal.dealId);
-    await saveSeenSet(ROOT_DIR, SEEN_PATH, seenSet);
     return;
   }
 
   if (!preliminary.shouldOpen) {
-    increment(state, "skipped");
-    await logger.logDecision({
-      timestamp: nowIso(),
-      dryRun: config.dryRun,
-      dealId: deal.dealId,
-      userName: deal.userName,
-      previewText: deal.previewText,
-      sourcePreview: deal.sourcePreview,
-      sourceOpenChat: "",
-      timeText: deal.timeText,
-      lastMessages: [],
-      lastIncomingCandidateMessages: [],
-      preliminaryScore: preliminary.preliminaryScore,
-      finalScore: preliminary.preliminaryScore,
+    await commitDecision({
+      deal,
+      state,
+      config,
+      logger,
+      seenSet,
+      watchlist,
+      preliminary,
+      finalAssessment: createPreliminaryFinalAssessment(preliminary, "SKIP"),
+      chatSnapshot: createEmptyChatSnapshot(),
+      eligibility: createEligibilityStub(),
       decision: "SKIP",
-      preliminaryHits: preliminary.preliminaryHits,
-      finalHits: preliminary.preliminaryHits,
-      acceptButtonDetected: false,
-      ownershipDecision: "NOT_CHECKED_PRELIMINARY_SKIP",
-      ownershipReason: "not_checked_preliminary_skip",
-      eligibilityAllowed: true,
-      eligibilityReason: "not_checked_preliminary_skip",
-      matchedManager: "",
-      matchedTimestamp: "",
-      lastOutgoingManagerMessage: null,
       scoringBypassed: false,
-      sourceModifierApplied: preliminary.sourceModifierApplied,
       note: "Low preliminary score, chat open was not needed",
     });
-    seenSet.add(deal.dealId);
-    await saveSeenSet(ROOT_DIR, SEEN_PATH, seenSet);
     return;
   }
 
@@ -200,67 +524,24 @@ async function processDeal({ deal, page, state, config, logger, seenSet }) {
       : "Accept button not detected";
   }
 
-  if (
-    effectiveDecision === "ACCEPT_CANDIDATE" ||
-    effectiveDecision === "FORCE_ACCEPT_SELF_CHAT"
-  ) {
-    increment(state, "acceptedCandidates");
-  } else if (effectiveDecision === "SKIP_STRONG_NEGATIVE") {
-    increment(state, "strongNegativeSkipped");
-  } else if (
-    effectiveDecision === "SKIP" ||
-    effectiveDecision === "BLOCK_BY_OWNER_RULE"
-  ) {
-    increment(state, "skipped");
-  }
-
-  const scoreSuffix =
-    finalAssessment.finalScore === null ||
-    finalAssessment.finalScore === undefined
-      ? ""
-      : ` (${finalAssessment.finalScore})`;
-  setLastAction(
+  await commitDecision({
+    deal,
     state,
-    `${effectiveDecision} ${deal.userName || deal.dealId}${scoreSuffix}`,
-  );
-
-  await logger.logDecision({
-    timestamp: nowIso(),
-    dryRun: config.dryRun,
-    dealId: deal.dealId,
-    userName: deal.userName,
-    previewText: deal.previewText,
-    sourcePreview: deal.sourcePreview,
-    sourceOpenChat: chatSnapshot.sourceOpenChat,
-    timeText: deal.timeText,
-    lastMessages: chatSnapshot.lastMessages,
-    lastIncomingCandidateMessages: chatSnapshot.lastIncomingCandidateMessages,
-    incomingDetectionMode: chatSnapshot.incomingDetectionMode,
-    scoringMessageBasis: finalAssessment.scoringMessageBasis,
-    scoringMessagesUsed: finalAssessment.scoringMessagesUsed,
-    preliminaryScore: preliminary.preliminaryScore,
-    finalScore: finalAssessment.finalScore,
+    config,
+    logger,
+    seenSet,
+    watchlist,
+    preliminary,
+    finalAssessment,
+    chatSnapshot,
+    eligibility,
     decision: effectiveDecision,
-    preliminaryHits: preliminary.preliminaryHits,
-    finalHits: finalAssessment.finalHits,
-    acceptButtonDetected: chatSnapshot.acceptButtonDetected,
-    ownershipDecision,
-    ownershipReason: eligibility.reason,
-    eligibilityAllowed: eligibility.allowed,
-    eligibilityReason: eligibility.reason,
-    matchedManager: eligibility.matchedManager,
-    matchedTimestamp: eligibility.matchedTimestamp,
-    lastOutgoingManagerMessage: eligibility.lastOutgoingMessage,
     scoringBypassed,
-    sourceModifierApplied: finalAssessment.sourceModifierApplied,
     note,
   });
-
-  seenSet.add(deal.dealId);
-  await saveSeenSet(ROOT_DIR, SEEN_PATH, seenSet);
 }
 
-async function scanLoop({ page, state, config, logger, seenSet }) {
+async function scanLoop({ page, state, config, logger, seenSet, watchlist }) {
   if (state.loopActive) {
     return;
   }
@@ -275,6 +556,19 @@ async function scanLoop({ page, state, config, logger, seenSet }) {
 
     try {
       const deals = await scanDealRows(page, logger, config.url);
+      const visibleDealsById = new Map(
+        deals.map((deal) => [deal.dealId, deal]),
+      );
+
+      await expireWatchlistEntries({
+        visibleDealsById,
+        state,
+        config,
+        logger,
+        seenSet,
+        watchlist,
+      });
+
       if (!deals.length) {
         setLastAction(state, "No new rows detected in current view");
       }
@@ -288,8 +582,29 @@ async function scanLoop({ page, state, config, logger, seenSet }) {
           continue;
         }
 
+        const watchlistEntry = watchlist[deal.dealId];
+        if (watchlistEntry && config.watchlist.enabled) {
+          const recheckState = shouldRecheckWatchEntry(
+            watchlistEntry,
+            deal,
+            config.watchlist.cooldownSeconds,
+          );
+
+          if (!recheckState.shouldRecheck) {
+            continue;
+          }
+        }
+
         try {
-          await processDeal({ deal, page, state, config, logger, seenSet });
+          await processDeal({
+            deal,
+            page,
+            state,
+            config,
+            logger,
+            seenSet,
+            watchlist,
+          });
         } catch (error) {
           await logger.error(
             "Deal processing failed, continuing with next dialog",
@@ -324,6 +639,7 @@ async function main() {
   await ensureProjectFiles(ROOT_DIR);
   const config = await loadConfig(ROOT_DIR, CONFIG_PATH);
   const seenSet = await loadSeenSet(ROOT_DIR, SEEN_PATH);
+  const watchlist = await loadWatchlist(ROOT_DIR, WATCHLIST_PATH);
   const state = createRuntimeState();
   const logger = createLogger({
     logPath: resolveProjectPath(ROOT_DIR, LOG_PATH),
@@ -407,14 +723,19 @@ async function main() {
 
     controls = createControls(state, handlers);
     controls.attach();
-    scanLoop({ page: browser.page, state, config, logger, seenSet }).catch(
-      async (error) => {
-        await logger.error("Background scan loop crashed", {
-          error: error.message,
-        });
-        await shutdown();
-      },
-    );
+    scanLoop({
+      page: browser.page,
+      state,
+      config,
+      logger,
+      seenSet,
+      watchlist,
+    }).catch(async (error) => {
+      await logger.error("Background scan loop crashed", {
+        error: error.message,
+      });
+      await shutdown();
+    });
 
     process.on("SIGINT", async () => {
       await shutdown();
