@@ -1,5 +1,12 @@
 const { normalizeText, toLowerNormalized } = require("./utils");
 
+const SOURCE_OPEN_CHAT_OUTGOING_MARKER_REGEX =
+  /^(submitted by user|отправлено пользователем)\b/i;
+const SOURCE_OPEN_CHAT_OUTGOING_QUOTED_NAME_REGEX =
+  /^(submitted by user|отправлено пользователем)\s*(?:"([^"]+)"|“([^”]+)”|«([^»]+)»|„([^”]+)”)/i;
+const SOURCE_OPEN_CHAT_OUTGOING_PLAIN_NAME_REGEX =
+  /^(submitted by user|отправлено пользователем)\s*([^|]+?)(?=\s*(?:\.\.\.|[|,;]|$))/i;
+
 function parseShiftTime(value) {
   const match = normalizeText(value).match(/^(\d{1,2}):(\d{2})$/);
   if (!match) {
@@ -249,8 +256,118 @@ function buildEligibilityResult(
   };
 }
 
+function inspectSourceOpenChatOwnershipSignal(sourceOpenChat, ownershipRules) {
+  const normalizedSourceOpenChat = normalizeText(sourceOpenChat);
+  const assistantNames = Array.isArray(ownershipRules?.assistantNames)
+    ? ownershipRules.assistantNames
+    : [];
+  const extractedManagerNames = [];
+  const sourceSegments = normalizedSourceOpenChat
+    ? normalizedSourceOpenChat
+        .split("|")
+        .map((segment) => normalizeText(segment))
+    : [];
+  let hasManagerOutgoingMarkers = false;
+
+  if (!normalizedSourceOpenChat) {
+    return {
+      hasManagerOutgoingMarkers: false,
+      extractedManagerNames,
+      matchedCurrentUser: "",
+      matchedAssistant: "",
+      matchedManager: "",
+    };
+  }
+
+  for (const segment of sourceSegments) {
+    if (!SOURCE_OPEN_CHAT_OUTGOING_MARKER_REGEX.test(segment)) {
+      continue;
+    }
+
+    hasManagerOutgoingMarkers = true;
+
+    const quotedNameMatch = segment.match(
+      SOURCE_OPEN_CHAT_OUTGOING_QUOTED_NAME_REGEX,
+    );
+    const plainNameMatch = quotedNameMatch
+      ? null
+      : segment.match(SOURCE_OPEN_CHAT_OUTGOING_PLAIN_NAME_REGEX);
+    const extractedManagerName = normalizeText(
+      quotedNameMatch?.[2] ||
+        quotedNameMatch?.[3] ||
+        quotedNameMatch?.[4] ||
+        quotedNameMatch?.[5] ||
+        plainNameMatch?.[2] ||
+        "",
+    );
+
+    if (extractedManagerName) {
+      extractedManagerNames.push(extractedManagerName);
+    }
+  }
+
+  const matchedCurrentUser =
+    extractedManagerNames
+      .map((managerName) =>
+        matchConfiguredManager(managerName, [ownershipRules?.currentUserName]),
+      )
+      .find(Boolean) || "";
+  const matchedAssistant =
+    extractedManagerNames
+      .map((managerName) => matchConfiguredManager(managerName, assistantNames))
+      .find(Boolean) || "";
+
+  return {
+    hasManagerOutgoingMarkers,
+    extractedManagerNames,
+    matchedCurrentUser,
+    matchedAssistant,
+    matchedManager:
+      matchedCurrentUser || matchedAssistant || extractedManagerNames[0] || "",
+  };
+}
+
+function applySourceOpenChatOwnershipFallback(
+  ownershipResult,
+  sourceOpenChat,
+  ownershipRules,
+) {
+  const indeterminateReasons = new Set([
+    "no_meaningful_outgoing_manager_messages",
+    "last_outgoing_timestamp_not_parsed",
+  ]);
+
+  if (!indeterminateReasons.has(ownershipResult?.reason)) {
+    return ownershipResult;
+  }
+
+  const sourceOwnershipSignal = inspectSourceOpenChatOwnershipSignal(
+    sourceOpenChat,
+    ownershipRules,
+  );
+
+  if (
+    sourceOwnershipSignal.hasManagerOutgoingMarkers &&
+    sourceOwnershipSignal.matchedManager &&
+    !sourceOwnershipSignal.matchedCurrentUser &&
+    !sourceOwnershipSignal.matchedAssistant
+  ) {
+    return {
+      allowed: false,
+      ownershipDecision: "BLOCK_BY_OWNER_RULE",
+      reason: "ownership_indeterminate_but_foreign_outgoing_markers_present",
+      matchedManager: sourceOwnershipSignal.matchedManager,
+      matchedTimestamp: "",
+      lastOutgoingMessage: null,
+    };
+  }
+
+  return ownershipResult;
+}
+
 function evaluateChatEligibility(
   messageTimeline,
+  sourceOpenChat,
   ownershipRules,
   now = new Date(),
 ) {
@@ -265,6 +382,7 @@ function evaluateChatEligibility(
     };
   }
 
+  let ownershipResult;
   const timeline = Array.isArray(messageTimeline) ? messageTimeline : [];
   const ignoredOutgoingPatterns = Array.isArray(
     ownershipRules?.ownershipIgnoredOutgoingPatterns,
@@ -280,7 +398,7 @@ function evaluateChatEligibility(
     );
 
   if (!lastOutgoingMessage) {
-    return {
+    ownershipResult = {
       allowed: true,
       ownershipDecision: "ALLOW_NORMAL",
       reason: "no_meaningful_outgoing_manager_messages",
@@ -288,6 +406,11 @@ function evaluateChatEligibility(
       matchedTimestamp: "",
       lastOutgoingMessage: null,
     };
+    return applySourceOpenChatOwnershipFallback(
+      ownershipResult,
+      sourceOpenChat,
+      ownershipRules,
+    );
   }
 
   const shiftBoundary = buildTodayShiftBoundary(ownershipRules, now);
@@ -298,11 +421,16 @@ function evaluateChatEligibility(
   );
 
   if (!parsedTimestamp) {
-    return buildEligibilityResult(
+    ownershipResult = buildEligibilityResult(
       true,
       "ALLOW_NORMAL",
       "last_outgoing_timestamp_not_parsed",
       lastOutgoingMessage,
+    );
+    return applySourceOpenChatOwnershipFallback(
+      ownershipResult,
+      sourceOpenChat,
+      ownershipRules,
     );
   }
 

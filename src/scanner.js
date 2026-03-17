@@ -36,7 +36,6 @@ async function scanDealRows(page, logger, baseUrl) {
   const rowCount = await rowLocator.count();
 
   if (!rowCount) {
-    await logger.warn("No dialog rows found by selector a.deals-row");
     return [];
   }
 

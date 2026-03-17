@@ -95,6 +95,16 @@
     "octane.rent dubai": 3,
     "octane.rent abu dhabi": 3,
 
+    "27 march": 3,
+    "march": 1,
+    "suv": 3,
+    "предложения": 2,
+    "good offers": 2,
+    "offer": 1,
+    "до четверга": 3,
+    "2 суток": 3,
+    "двое суток": 3,
+
     "bmw": 2,
     "mercedes": 2,
     "mercedes benz": 2,
@@ -320,7 +330,35 @@
     "i’ll personally select the most suitable vehicle": -5,
     "i'll personally select the most suitable vehicle": -5,
     "we received information that you wish to take the car now": -6,
-    "this is octane luxury car rental": -4
+    "this is octane luxury car rental": -4,
+
+    "corporate department": -10,
+    "corporate": -6,
+    "корпоративный департамент": -10,
+    "корпоративный отдел": -10,
+
+    "investment": -10,
+    "investments": -10,
+    "investor": -8,
+    "invest": -8,
+    "investment proposal": -10,
+    "инвестиции": -10,
+    "по поводу инвестиций": -10,
+
+    "car rental inquiry": -10,
+    "thank you for your car rental inquiry": -12,
+    "octane rent corporate department": -18,
+    "pickup": -8,
+    "pick up": -8,
+    "one tone pickup": -12,
+    "pickup truck": -10,
+    "mileage restriction": -8,
+    "mileage": -6,
+    "v-class": -10,
+    "v class": -10,
+    "van": -8,
+    "corporate fleet": -12,
+    "fleet": -8
   },
 
   "sourceWeights": {

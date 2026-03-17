@@ -48,6 +48,7 @@ function createOwnershipBypassAssessment() {
     finalScore: null,
     scoringMessageBasis: "ownership_rule_bypass",
     scoringMessagesUsed: [],
+    combinedText: "",
     sourceModifierApplied: false,
     finalHits: [],
   };
@@ -59,6 +60,7 @@ function createPreliminaryFinalAssessment(preliminary, decision) {
     finalScore: preliminary.preliminaryScore,
     scoringMessageBasis: "preview_only",
     scoringMessagesUsed: [],
+    combinedText: "",
     sourceModifierApplied: preliminary.sourceModifierApplied,
     finalHits: preliminary.preliminaryHits,
   };
@@ -104,6 +106,7 @@ function createExpirationAssessments() {
       finalScore: null,
       scoringMessageBasis: "watchlist_expired",
       scoringMessagesUsed: [],
+      combinedText: "",
       sourceModifierApplied: false,
       finalHits: [],
     },
@@ -149,6 +152,7 @@ function buildDecisionLogPayload({
     incomingDetectionMode: chatSnapshot.incomingDetectionMode,
     scoringMessageBasis: finalAssessment.scoringMessageBasis,
     scoringMessagesUsed: finalAssessment.scoringMessagesUsed,
+    combinedText: finalAssessment.combinedText,
     preliminaryScore: preliminary.preliminaryScore,
     finalScore: finalAssessment.finalScore,
     decision,
@@ -366,7 +370,11 @@ async function expireWatchlistEntries({
   const now = new Date();
 
   for (const [dealId, entry] of Object.entries(watchlist)) {
-    const expirationState = isWatchlistEntryExpired(entry, config.watchlist, now);
+    const expirationState = isWatchlistEntryExpired(
+      entry,
+      config.watchlist,
+      now,
+    );
     if (!expirationState.expiredByTime && !expirationState.expiredByRetries) {
       continue;
     }
@@ -492,6 +500,7 @@ async function processDeal({
   const chatSnapshot = await readOpenChat(page, logger, config);
   const eligibility = evaluateChatEligibility(
     chatSnapshot.messageTimeline,
+    chatSnapshot.sourceOpenChat,
     config.ownershipRules,
   );
   const ownershipDecision = eligibility.ownershipDecision || "ALLOW_NORMAL";
@@ -510,7 +519,10 @@ async function processDeal({
     scoringBypassed = true;
     effectiveDecision = "BLOCK_BY_OWNER_RULE";
     note =
-      "Blocked by ownership rule because the latest outgoing message after boundary belongs to another manager";
+      eligibility.reason ===
+      "ownership_indeterminate_but_foreign_outgoing_markers_present"
+        ? "Blocked by ownership rule because ownership is indeterminate and sourceOpenChat contains foreign outgoing manager markers"
+        : "Blocked by ownership rule because the latest outgoing message after boundary belongs to another manager";
   } else {
     finalAssessment = buildFinalAssessment(
       deal,
@@ -570,7 +582,13 @@ async function scanLoop({ page, state, config, logger, seenSet, watchlist }) {
       });
 
       if (!deals.length) {
+        if (!state.dialogListEmpty) {
+          state.dialogListEmpty = true;
+          await logger.info("Dialog list is empty");
+        }
         setLastAction(state, "No new rows detected in current view");
+      } else if (state.dialogListEmpty) {
+        state.dialogListEmpty = false;
       }
 
       for (const deal of deals) {

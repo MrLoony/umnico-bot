@@ -1,16 +1,17 @@
 function createRuntimeState() {
   return {
-    mode: 'IDLE',
+    mode: "IDLE",
     shouldExit: false,
     loopActive: false,
     browserReady: false,
+    dialogListEmpty: false,
     checked: 0,
     opened: 0,
     acceptedCandidates: 0,
     skipped: 0,
     strongNegativeSkipped: 0,
-    lastAction: 'Waiting for browser and start command',
-    recentEvents: []
+    lastAction: "Waiting for browser and start command",
+    recentEvents: [],
   };
 }
 
@@ -39,5 +40,5 @@ module.exports = {
   createRuntimeState,
   increment,
   setLastAction,
-  setMode
+  setMode,
 };

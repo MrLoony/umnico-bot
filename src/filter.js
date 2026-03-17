@@ -1,17 +1,21 @@
-const { normalizeText, toLowerNormalized } = require('./utils');
+const { normalizeText, parseTimestamp, toLowerNormalized } = require("./utils");
+
+const MAX_SCORING_MESSAGES = 3;
+const MESSAGE_TIME_WINDOW_MS = 15 * 60 * 1000;
 
 const TOKEN_CHAR_REGEX = /[\p{L}\p{N}]/u;
 
 function isTokenChar(character) {
-  return TOKEN_CHAR_REGEX.test(character || '');
+  return TOKEN_CHAR_REGEX.test(character || "");
 }
 
 function isBoundaryMatch(text, startIndex, endIndex) {
-  const previousCharacter = startIndex > 0 ? text[startIndex - 1] : '';
-  const nextCharacter = endIndex < text.length ? text[endIndex] : '';
+  const previousCharacter = startIndex > 0 ? text[startIndex - 1] : "";
+  const nextCharacter = endIndex < text.length ? text[endIndex] : "";
 
   const leftBoundaryOk = startIndex === 0 || !isTokenChar(previousCharacter);
-  const rightBoundaryOk = endIndex === text.length || !isTokenChar(nextCharacter);
+  const rightBoundaryOk =
+    endIndex === text.length || !isTokenChar(nextCharacter);
 
   return leftBoundaryOk && rightBoundaryOk;
 }
@@ -41,7 +45,7 @@ function findNonOverlappingMatches(text, keywordWeights) {
           weight,
           start: matchIndex,
           end: matchEnd,
-          length: normalizedKeyword.length
+          length: normalizedKeyword.length,
         });
       }
 
@@ -65,7 +69,10 @@ function findNonOverlappingMatches(text, keywordWeights) {
   const acceptedByKeyword = new Map();
 
   for (const match of matches) {
-    const overlaps = acceptedMatches.some((accepted) => !(match.end <= accepted.start || match.start >= accepted.end));
+    const overlaps = acceptedMatches.some(
+      (accepted) =>
+        !(match.end <= accepted.start || match.start >= accepted.end),
+    );
     if (overlaps) {
       continue;
     }
@@ -95,7 +102,7 @@ function scoreKeywordMap(text, keywordWeights) {
         keyword: match.keyword,
         weight: match.weight,
         occurrences: 0,
-        delta: 0
+        delta: 0,
       });
     }
 
@@ -106,7 +113,7 @@ function scoreKeywordMap(text, keywordWeights) {
 
   return {
     score,
-    hits: Array.from(hitMap.values())
+    hits: Array.from(hitMap.values()),
   };
 }
 
@@ -126,7 +133,7 @@ function mergeWeightMaps(...weightMaps) {
   return result;
 }
 
-function scoreWeightGroups(text, groups, bucketSuffix = '') {
+function scoreWeightGroups(text, groups, bucketSuffix = "") {
   let score = 0;
   const hits = [];
 
@@ -137,10 +144,12 @@ function scoreWeightGroups(text, groups, bucketSuffix = '') {
     }
 
     score += groupScore.score;
-    hits.push(...groupScore.hits.map((item) => ({
-      ...item,
-      bucket: `${group.bucket}${bucketSuffix}`
-    })));
+    hits.push(
+      ...groupScore.hits.map((item) => ({
+        ...item,
+        bucket: `${group.bucket}${bucketSuffix}`,
+      })),
+    );
   }
 
   return { score, hits };
@@ -153,90 +162,214 @@ function emptyScore() {
 function getPositivePreviewGroups(config) {
   return [
     {
-      bucket: 'include',
-      weights: mergeWeightMaps(config.includeKeywords, config.includeWeights)
+      bucket: "include",
+      weights: mergeWeightMaps(config.includeKeywords, config.includeWeights),
     },
     {
-      bucket: 'phrase',
-      weights: config.phraseWeights
+      bucket: "phrase",
+      weights: config.phraseWeights,
     },
     {
-      bucket: 'brand',
-      weights: config.brandWeights
+      bucket: "brand",
+      weights: config.brandWeights,
     },
     {
-      bucket: 'model',
-      weights: config.modelWeights
-    }
+      bucket: "model",
+      weights: config.modelWeights,
+    },
   ];
 }
 
 function getNegativePreviewGroups(config) {
   return [
     {
-      bucket: 'exclude',
-      weights: mergeWeightMaps(config.excludeKeywords, config.excludeWeights)
-    }
+      bucket: "exclude",
+      weights: mergeWeightMaps(config.excludeKeywords, config.excludeWeights),
+    },
   ];
 }
 
 function getSourceGroups(config) {
   return [
     {
-      bucket: 'source',
-      weights: config.sourceWeights
-    }
+      bucket: "source",
+      weights: config.sourceWeights,
+    },
   ];
 }
 
 function hasPositiveTextSignal(...scores) {
-  return scores.some((score) => Array.isArray(score.hits) && score.hits.length > 0 && score.score > 0);
+  return scores.some(
+    (score) =>
+      Array.isArray(score.hits) && score.hits.length > 0 && score.score > 0,
+  );
 }
 
-function selectMessagesForFinalAssessment(chatSnapshot) {
-  const incomingMessages = Array.isArray(chatSnapshot?.lastIncomingCandidateMessages)
-    ? chatSnapshot.lastIncomingCandidateMessages.map((item) => normalizeText(item)).filter(Boolean)
-    : [];
-  const lastMessages = Array.isArray(chatSnapshot?.lastMessages)
-    ? chatSnapshot.lastMessages.map((item) => normalizeText(item)).filter(Boolean)
-    : [];
-
-  if (incomingMessages.length) {
-    return {
-      messages: incomingMessages,
-      basis: 'incoming_candidates'
-    };
-  }
+function buildSelectionFromTextMessages(messages, basis) {
+  const normalizedMessages = (messages || [])
+    .map((item) => normalizeText(item))
+    .filter(Boolean);
 
   return {
-    messages: lastMessages,
-    basis: 'all_messages_fallback'
+    messages: normalizedMessages,
+    basis,
+    scoringMessagesUsed: normalizedMessages.map((text) => ({
+      text,
+      timestampText: "",
+    })),
+    combinedText: normalizedMessages.join(" "),
   };
 }
 
+function buildSelectionFromTimelineMessages(messages, basis) {
+  const scoringMessagesUsed = (messages || [])
+    .map((message) => ({
+      text: normalizeText(message?.text),
+      timestampText: normalizeText(message?.timestampText),
+    }))
+    .filter((message) => message.text);
+
+  return {
+    messages: scoringMessagesUsed.map((message) => message.text),
+    basis,
+    scoringMessagesUsed,
+    combinedText: scoringMessagesUsed.map((message) => message.text).join(" "),
+  };
+}
+
+function selectFallbackMessagesForFinalAssessment(chatSnapshot) {
+  const incomingMessages = Array.isArray(
+    chatSnapshot?.lastIncomingCandidateMessages,
+  )
+    ? chatSnapshot.lastIncomingCandidateMessages
+        .map((item) => normalizeText(item))
+        .filter(Boolean)
+    : [];
+  const lastMessages = Array.isArray(chatSnapshot?.lastMessages)
+    ? chatSnapshot.lastMessages
+        .map((item) => normalizeText(item))
+        .filter(Boolean)
+    : [];
+
+  if (incomingMessages.length) {
+    return buildSelectionFromTextMessages(
+      incomingMessages,
+      "incoming_candidates",
+    );
+  }
+
+  return buildSelectionFromTextMessages(lastMessages, "all_messages_fallback");
+}
+
+function selectMessagesForFinalAssessment(chatSnapshot) {
+  const incomingTimelineMessages = Array.isArray(chatSnapshot?.messageTimeline)
+    ? chatSnapshot.messageTimeline
+        .map((message, index) => ({
+          index,
+          direction: normalizeText(message?.direction),
+          text: normalizeText(message?.text),
+          timestampText: normalizeText(message?.timestampText),
+        }))
+        .filter(
+          (message) =>
+            message.direction === "incoming" && message.text.length >= 2,
+        )
+    : [];
+
+  if (!incomingTimelineMessages.length) {
+    return selectFallbackMessagesForFinalAssessment(chatSnapshot);
+  }
+
+  const validTimedMessages = incomingTimelineMessages
+    .map((message) => {
+      const parsedTimestamp = parseTimestamp(message.timestampText);
+      if (!parsedTimestamp) {
+        return null;
+      }
+
+      return {
+        ...message,
+        parsedTimestamp,
+        timestampMs: parsedTimestamp.getTime(),
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => {
+      if (right.timestampMs !== left.timestampMs) {
+        return right.timestampMs - left.timestampMs;
+      }
+
+      return right.index - left.index;
+    });
+
+  if (!validTimedMessages.length) {
+    return selectFallbackMessagesForFinalAssessment(chatSnapshot);
+  }
+
+  const anchorMessage = validTimedMessages[0];
+  const selectedMessages = [];
+
+  for (const message of validTimedMessages) {
+    const timeGapMs = Math.abs(anchorMessage.timestampMs - message.timestampMs);
+    if (timeGapMs > MESSAGE_TIME_WINDOW_MS) {
+      break;
+    }
+
+    selectedMessages.push(message);
+    if (selectedMessages.length >= MAX_SCORING_MESSAGES) {
+      break;
+    }
+  }
+
+  selectedMessages.sort((left, right) => {
+    if (left.timestampMs !== right.timestampMs) {
+      return left.timestampMs - right.timestampMs;
+    }
+
+    return left.index - right.index;
+  });
+
+  return buildSelectionFromTimelineMessages(
+    selectedMessages,
+    "multi_message_time_window",
+  );
+}
+
 function buildPreliminaryAssessment(deal, config) {
-  const previewPositiveScore = scoreWeightGroups(deal.previewText, getPositivePreviewGroups(config));
-  const previewNegativeScore = scoreWeightGroups(deal.previewText, getNegativePreviewGroups(config));
+  const previewPositiveScore = scoreWeightGroups(
+    deal.previewText,
+    getPositivePreviewGroups(config),
+  );
+  const previewNegativeScore = scoreWeightGroups(
+    deal.previewText,
+    getNegativePreviewGroups(config),
+  );
   const sourceScore = hasPositiveTextSignal(previewPositiveScore)
     ? scoreWeightGroups(deal.sourcePreview, getSourceGroups(config))
     : emptyScore();
-  const combinedScore = previewPositiveScore.score + previewNegativeScore.score + sourceScore.score;
+  const combinedScore =
+    previewPositiveScore.score + previewNegativeScore.score + sourceScore.score;
   const combinedHits = [
     ...previewPositiveScore.hits,
     ...previewNegativeScore.hits,
-    ...sourceScore.hits
+    ...sourceScore.hits,
   ];
 
-  const previewWordCount = normalizeText(deal.previewText).split(' ').filter(Boolean).length;
+  const previewWordCount = normalizeText(deal.previewText)
+    .split(" ")
+    .filter(Boolean).length;
   const hasNegativeHits = previewNegativeScore.hits.length > 0;
-  const ambiguousPreview = !normalizeText(deal.previewText) || previewWordCount <= config.ambiguousPreviewWordCount;
-  const shouldOpen = combinedScore >= config.openCheckThreshold || ambiguousPreview;
+  const ambiguousPreview =
+    !normalizeText(deal.previewText) ||
+    previewWordCount <= config.ambiguousPreviewWordCount;
+  const shouldOpen =
+    combinedScore >= config.openCheckThreshold || ambiguousPreview;
 
-  let decision = 'SKIP';
+  let decision = "SKIP";
   if (combinedScore <= config.strongNegativeThreshold && hasNegativeHits) {
-    decision = 'SKIP_STRONG_NEGATIVE';
+    decision = "SKIP_STRONG_NEGATIVE";
   } else if (shouldOpen) {
-    decision = 'OPEN_CHECK';
+    decision = "OPEN_CHECK";
   }
 
   return {
@@ -246,46 +379,69 @@ function buildPreliminaryAssessment(deal, config) {
     preliminaryHits: combinedHits,
     previewPositiveScore: previewPositiveScore.score,
     sourceModifierApplied: sourceScore.score !== 0,
-    shouldOpen
+    shouldOpen,
   };
 }
 
 function buildFinalAssessment(deal, chatSnapshot, config) {
-  const previewPositiveScore = scoreWeightGroups(deal.previewText, getPositivePreviewGroups(config));
-  const previewNegativeScore = scoreWeightGroups(deal.previewText, getNegativePreviewGroups(config));
+  const previewPositiveScore = scoreWeightGroups(
+    deal.previewText,
+    getPositivePreviewGroups(config),
+  );
+  const previewNegativeScore = scoreWeightGroups(
+    deal.previewText,
+    getNegativePreviewGroups(config),
+  );
   const selectedMessages = selectMessagesForFinalAssessment(chatSnapshot);
-  const messageText = selectedMessages.messages.join(' ');
-  const messagePositiveScore = scoreWeightGroups(messageText, getPositivePreviewGroups(config), '_open_chat');
-  const messageNegativeScore = scoreWeightGroups(messageText, getNegativePreviewGroups(config), '_open_chat');
-  const sourceModifierAllowed = hasPositiveTextSignal(previewPositiveScore, messagePositiveScore);
+  const messageText = selectedMessages.combinedText;
+  const messagePositiveScore = scoreWeightGroups(
+    messageText,
+    getPositivePreviewGroups(config),
+    "_open_chat",
+  );
+  const messageNegativeScore = scoreWeightGroups(
+    messageText,
+    getNegativePreviewGroups(config),
+    "_open_chat",
+  );
+  const sourceModifierAllowed = hasPositiveTextSignal(
+    previewPositiveScore,
+    messagePositiveScore,
+  );
   const sourcePreviewScore = sourceModifierAllowed
     ? scoreWeightGroups(deal.sourcePreview, getSourceGroups(config))
     : emptyScore();
   const sourceOpenChatScore = sourceModifierAllowed
-    ? scoreWeightGroups(chatSnapshot.sourceOpenChat, getSourceGroups(config), '_open_chat')
+    ? scoreWeightGroups(
+        chatSnapshot.sourceOpenChat,
+        getSourceGroups(config),
+        "_open_chat",
+      )
     : emptyScore();
 
-  const finalScore = previewPositiveScore.score
-    + previewNegativeScore.score
-    + messagePositiveScore.score
-    + messageNegativeScore.score
-    + sourcePreviewScore.score
-    + sourceOpenChatScore.score;
+  const finalScore =
+    previewPositiveScore.score +
+    previewNegativeScore.score +
+    messagePositiveScore.score +
+    messageNegativeScore.score +
+    sourcePreviewScore.score +
+    sourceOpenChatScore.score;
 
-  let decision = 'SKIP';
+  let decision = "SKIP";
   if (finalScore <= config.strongNegativeThreshold) {
-    decision = 'SKIP_STRONG_NEGATIVE';
+    decision = "SKIP_STRONG_NEGATIVE";
   } else if (finalScore >= config.acceptCandidateThreshold) {
-    decision = 'ACCEPT_CANDIDATE';
+    decision = "ACCEPT_CANDIDATE";
   } else if (finalScore >= config.openCheckThreshold) {
-    decision = 'OPEN_CHECK';
+    decision = "OPEN_CHECK";
   }
 
   return {
     decision,
     finalScore,
     scoringMessageBasis: selectedMessages.basis,
-    scoringMessagesUsed: selectedMessages.messages,
+    scoringMessagesUsed: selectedMessages.scoringMessagesUsed,
+    combinedText: selectedMessages.combinedText,
     sourceModifierApplied: sourceModifierAllowed,
     finalHits: [
       ...previewPositiveScore.hits,
@@ -293,13 +449,14 @@ function buildFinalAssessment(deal, chatSnapshot, config) {
       ...sourcePreviewScore.hits,
       ...messagePositiveScore.hits,
       ...messageNegativeScore.hits,
-      ...sourceOpenChatScore.hits
-    ]
+      ...sourceOpenChatScore.hits,
+    ],
   };
 }
 
 module.exports = {
   buildFinalAssessment,
   buildPreliminaryAssessment,
-  scoreKeywordMap
+  parseTimestamp,
+  scoreKeywordMap,
 };
