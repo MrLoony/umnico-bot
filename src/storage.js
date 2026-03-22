@@ -15,7 +15,9 @@ const DEFAULT_CONFIG = {
   initialGotoTimeoutMs: 30000,
   pollIntervalMs: 1200,
   openChatTimeoutMs: 7000,
+  acceptButtonTimeoutMs: 4000,
   postOpenDelayMs: 600,
+  postAcceptDelayMs: 800,
   betweenDealsDelayMs: 300,
   maxLastMessages: 3,
   ambiguousPreviewWordCount: 3,
@@ -162,6 +164,18 @@ function mergeConfig(rawConfig) {
       ? Number(rawConfig.watchlist.maxRetries)
       : DEFAULT_CONFIG.watchlist.maxRetries,
   };
+
+  normalizedConfig.postAcceptDelayMs = Number.isFinite(
+    Number(rawConfig?.postAcceptDelayMs),
+  )
+    ? Number(rawConfig.postAcceptDelayMs)
+    : DEFAULT_CONFIG.postAcceptDelayMs;
+
+  normalizedConfig.acceptButtonTimeoutMs = Number.isFinite(
+    Number(rawConfig?.acceptButtonTimeoutMs),
+  )
+    ? Number(rawConfig.acceptButtonTimeoutMs)
+    : DEFAULT_CONFIG.acceptButtonTimeoutMs;
 
   return normalizedConfig;
 }

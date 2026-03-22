@@ -134,6 +134,8 @@ function buildDecisionLogPayload({
   watchReason = "",
   recheckAfterSeconds = null,
   retryCount = null,
+  acceptClicked = false,
+  acceptClickReason = null,
 }) {
   const ownershipDecision =
     eligibility?.ownershipDecision || PRELIMINARY_SKIP_OWNERSHIP_DECISION;
@@ -173,6 +175,8 @@ function buildDecisionLogPayload({
     watchReason,
     recheckAfterSeconds,
     retryCount,
+    acceptClicked,
+    acceptClickReason,
   };
 }
 
@@ -193,6 +197,52 @@ function updateStateForDecision(state, decision) {
   if (decision === "SKIP" || decision === "BLOCK_BY_OWNER_RULE") {
     increment(state, "skipped");
   }
+}
+
+async function tryAcceptChat(page, logger, config) {
+  if (config.dryRun) {
+    await logger.info("DRY RUN: accept click skipped");
+    return { clicked: false, reason: "dry_run" };
+  }
+
+  const acceptButtonTimeoutMs = Number.isFinite(
+    Number(config.acceptButtonTimeoutMs),
+  )
+    ? Number(config.acceptButtonTimeoutMs)
+    : 4000;
+  const button = page.locator("#messaging-accept-dialog").first();
+
+  try {
+    await button.waitFor({
+      state: "visible",
+      timeout: acceptButtonTimeoutMs,
+    });
+  } catch (error) {
+    await logger.warn("Accept button not found after wait", {
+      timeoutMs: acceptButtonTimeoutMs,
+      error: error.message,
+    });
+    return { clicked: false, reason: "not_found_after_wait" };
+  }
+
+  try {
+    await button.click({ timeout: 2000 });
+    await logger.info("Accept button clicked");
+
+    return { clicked: true };
+  } catch (error) {
+    await logger.error("Accept click failed", {
+      error: error.message,
+    });
+
+    return { clicked: false, reason: "click_failed" };
+  }
+}
+
+async function playAcceptSound() {
+  try {
+    process.stdout.write("\x07");
+  } catch (_) {}
 }
 
 async function markDealProcessed(dealId, seenSet, watchlist) {
@@ -219,6 +269,7 @@ async function scheduleDealWatch(dealId, watchlist, entry) {
 
 async function commitDecision({
   deal,
+  page,
   state,
   config,
   logger,
@@ -239,6 +290,7 @@ async function commitDecision({
   let recheckAfterSeconds = null;
   let retryCount = null;
   let watchlistEntry = null;
+  let acceptResult = { clicked: false };
 
   if (decision === "SKIP" && config.watchlist.enabled) {
     const watchContext = getWatchDecisionContext(
@@ -278,6 +330,25 @@ async function commitDecision({
     }
   }
 
+  if (
+    effectiveDecision === "ACCEPT_CANDIDATE" ||
+    effectiveDecision === "FORCE_ACCEPT_SELF_CHAT"
+  ) {
+    acceptResult = await tryAcceptChat(page, logger, config);
+
+    if (acceptResult.clicked) {
+      await playAcceptSound();
+      await logger.info("Accept sound played");
+
+      if (config.postAcceptDelayMs > 0) {
+        await logger.info("Waiting after accept click", {
+          delayMs: config.postAcceptDelayMs,
+        });
+        await sleep(config.postAcceptDelayMs);
+      }
+    }
+  }
+
   updateStateForDecision(state, effectiveDecision);
   setLastAction(
     state,
@@ -299,6 +370,8 @@ async function commitDecision({
       watchReason,
       recheckAfterSeconds,
       retryCount,
+      acceptClicked: acceptResult.clicked,
+      acceptClickReason: acceptResult.reason || null,
     }),
   );
 
@@ -448,6 +521,7 @@ async function processDeal({
   if (preliminary.decision === "SKIP_STRONG_NEGATIVE") {
     await commitDecision({
       deal,
+      page,
       state,
       config,
       logger,
@@ -470,6 +544,7 @@ async function processDeal({
   if (!preliminary.shouldOpen) {
     await commitDecision({
       deal,
+      page,
       state,
       config,
       logger,
@@ -532,12 +607,13 @@ async function processDeal({
     );
     effectiveDecision = finalAssessment.decision;
     note = chatSnapshot.acceptButtonDetected
-      ? "Accept button detected but intentionally not clicked in dry-run diagnostics"
-      : "Accept button not detected";
+      ? "Accept button detected during chat scan"
+      : "Accept button not detected during chat scan";
   }
 
   await commitDecision({
     deal,
+    page,
     state,
     config,
     logger,
