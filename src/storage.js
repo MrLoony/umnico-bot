@@ -16,6 +16,8 @@ const DEFAULT_CONFIG = {
   pollIntervalMs: 1200,
   openChatTimeoutMs: 7000,
   acceptButtonTimeoutMs: 4000,
+  soundNotificationEnabled: true,
+  soundNotificationMode: "auto",
   postOpenDelayMs: 600,
   postAcceptDelayMs: 800,
   betweenDealsDelayMs: 300,
@@ -176,6 +178,17 @@ function mergeConfig(rawConfig) {
   )
     ? Number(rawConfig.acceptButtonTimeoutMs)
     : DEFAULT_CONFIG.acceptButtonTimeoutMs;
+
+  normalizedConfig.soundNotificationEnabled =
+    typeof rawConfig?.soundNotificationEnabled === "boolean"
+      ? rawConfig.soundNotificationEnabled
+      : DEFAULT_CONFIG.soundNotificationEnabled;
+
+  normalizedConfig.soundNotificationMode =
+    typeof rawConfig?.soundNotificationMode === "string" &&
+    rawConfig.soundNotificationMode.trim()
+      ? rawConfig.soundNotificationMode.trim().toLowerCase()
+      : DEFAULT_CONFIG.soundNotificationMode;
 
   return normalizedConfig;
 }

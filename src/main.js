@@ -1,4 +1,5 @@
 const path = require("node:path");
+const { spawn } = require("node:child_process");
 const { chromium } = require("playwright");
 const { readOpenChat } = require("./chatReader");
 const { createControls } = require("./controls");
@@ -41,6 +42,7 @@ const WATCH_DECISION = "WATCH_RECHECK";
 const WATCHLIST_EXPIRED_REASON = "watchlist_expired";
 const PRELIMINARY_SKIP_OWNERSHIP_DECISION = "NOT_CHECKED_PRELIMINARY_SKIP";
 const PRELIMINARY_SKIP_OWNERSHIP_REASON = "not_checked_preliminary_skip";
+const SOUND_COMMAND_TIMEOUT_MS = 1200;
 
 function createOwnershipBypassAssessment() {
   return {
@@ -239,10 +241,143 @@ async function tryAcceptChat(page, logger, config) {
   }
 }
 
-async function playAcceptSound() {
+function runSoundCommand(command, args, timeoutMs = SOUND_COMMAND_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let child = null;
+    let timeoutId = null;
+
+    const finish = (played) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      resolve(played);
+    };
+
+    try {
+      child = spawn(command, args, {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch (_) {
+      finish(false);
+      return;
+    }
+
+    timeoutId = setTimeout(() => {
+      try {
+        child.kill();
+      } catch (_) {}
+      finish(false);
+    }, timeoutMs);
+
+    child.once("error", () => finish(false));
+    child.once("exit", (code) => finish(code === 0));
+  });
+}
+
+function getSoundBackends(platform) {
+  if (platform === "win32") {
+    return [
+      {
+        name: "powershell_console_beep",
+        command: "powershell",
+        args: ["-c", "[console]::beep(1000,300)"],
+      },
+      {
+        name: "powershell_system_asterisk",
+        command: "powershell",
+        args: ["-c", "[System.Media.SystemSounds]::Asterisk.Play()"],
+      },
+    ];
+  }
+
+  if (platform === "darwin") {
+    return [
+      {
+        name: "afplay_glass",
+        command: "afplay",
+        args: ["/System/Library/Sounds/Glass.aiff"],
+      },
+    ];
+  }
+
+  return [
+    {
+      name: "paplay_message",
+      command: "paplay",
+      args: ["/usr/share/sounds/freedesktop/stereo/message.oga"],
+    },
+    {
+      name: "canberra_message",
+      command: "canberra-gtk-play",
+      args: ["-i", "message"],
+    },
+    {
+      name: "aplay_front_center",
+      command: "aplay",
+      args: ["/usr/share/sounds/alsa/Front_Center.wav"],
+    },
+  ];
+}
+
+async function playAcceptSound(logger, config) {
+  if (config.soundNotificationEnabled !== true) {
+    return { soundPlayed: false, soundBackend: null };
+  }
+
+  const soundNotificationMode =
+    typeof config.soundNotificationMode === "string" &&
+    config.soundNotificationMode.trim()
+      ? config.soundNotificationMode.trim().toLowerCase()
+      : "auto";
+  const backends =
+    soundNotificationMode === "auto"
+      ? getSoundBackends(process.platform)
+      : getSoundBackends(process.platform);
+
+  for (const backend of backends) {
+    try {
+      const played = await runSoundCommand(backend.command, backend.args);
+      if (!played) {
+        continue;
+      }
+
+      try {
+        await logger.info("Accept sound notification completed", {
+          soundPlayed: true,
+          soundBackend: backend.name,
+        });
+      } catch (_) {}
+
+      return { soundPlayed: true, soundBackend: backend.name };
+    } catch (_) {
+      continue;
+    }
+  }
+
+  let soundPlayed = false;
   try {
     process.stdout.write("\x07");
+    soundPlayed = true;
   } catch (_) {}
+
+  try {
+    await logger.info("Accept sound notification completed", {
+      soundPlayed,
+      soundBackend: "fallback_bell",
+    });
+  } catch (_) {}
+
+  return {
+    soundPlayed,
+    soundBackend: "fallback_bell",
+  };
 }
 
 async function markDealProcessed(dealId, seenSet, watchlist) {
@@ -337,8 +472,7 @@ async function commitDecision({
     acceptResult = await tryAcceptChat(page, logger, config);
 
     if (acceptResult.clicked) {
-      await playAcceptSound();
-      await logger.info("Accept sound played");
+      await playAcceptSound(logger, config);
 
       if (config.postAcceptDelayMs > 0) {
         await logger.info("Waiting after accept click", {
