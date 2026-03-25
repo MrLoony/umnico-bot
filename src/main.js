@@ -44,6 +44,143 @@ const PRELIMINARY_SKIP_OWNERSHIP_DECISION = "NOT_CHECKED_PRELIMINARY_SKIP";
 const PRELIMINARY_SKIP_OWNERSHIP_REASON = "not_checked_preliminary_skip";
 const SOUND_COMMAND_TIMEOUT_MS = 1200;
 
+function parseWorkingHoursTime(value) {
+  const match = String(value || "")
+    .trim()
+    .match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) {
+    return null;
+  }
+
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (
+    !Number.isInteger(hour) ||
+    !Number.isInteger(minute) ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59
+  ) {
+    return null;
+  }
+
+  return hour * 60 + minute;
+}
+
+function getZonedClockParts(now, timeZone) {
+  try {
+    const formatter = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+
+    const parts = Object.fromEntries(
+      formatter
+        .formatToParts(now)
+        .filter((part) => part.type !== "literal")
+        .map((part) => [part.type, part.value]),
+    );
+
+    const year = Number(parts.year);
+    const month = Number(parts.month);
+    const day = Number(parts.day);
+    const hour = Number(parts.hour);
+    const minute = Number(parts.minute);
+
+    if (
+      !Number.isInteger(year) ||
+      !Number.isInteger(month) ||
+      !Number.isInteger(day) ||
+      !Number.isInteger(hour) ||
+      !Number.isInteger(minute)
+    ) {
+      return null;
+    }
+
+    return { year, month, day, hour, minute };
+  } catch (_) {
+    return null;
+  }
+}
+
+function formatWorkingHoursCurrentTime(now, timeZone) {
+  const parts = getZonedClockParts(now, timeZone);
+  if (!parts) {
+    return "";
+  }
+
+  return `${String(parts.year).padStart(4, "0")}-${String(parts.month).padStart(
+    2,
+    "0",
+  )}-${String(parts.day).padStart(2, "0")} ${String(parts.hour).padStart(
+    2,
+    "0",
+  )}:${String(parts.minute).padStart(2, "0")}`;
+}
+
+function isWithinWorkingHours(now, workingHoursConfig) {
+  const timeZone = String(workingHoursConfig?.timezone || "").trim();
+  const startMinutes = parseWorkingHoursTime(workingHoursConfig?.start);
+  const endMinutes = parseWorkingHoursTime(workingHoursConfig?.end);
+  const currentParts = getZonedClockParts(now, timeZone);
+
+  if (
+    !timeZone ||
+    startMinutes === null ||
+    endMinutes === null ||
+    !currentParts
+  ) {
+    return false;
+  }
+
+  if (startMinutes === endMinutes) {
+    return false;
+  }
+
+  const currentMinutes = currentParts.hour * 60 + currentParts.minute;
+  if (startMinutes < endMinutes) {
+    return currentMinutes >= startMinutes && currentMinutes < endMinutes;
+  }
+
+  return currentMinutes >= startMinutes || currentMinutes < endMinutes;
+}
+
+async function stopDueToOutsideWorkingHours(state, logger, config) {
+  if (!config.workingHours?.enabled) {
+    return false;
+  }
+
+  const now = new Date();
+  if (isWithinWorkingHours(now, config.workingHours)) {
+    return false;
+  }
+
+  if (state.shouldExit) {
+    return true;
+  }
+
+  state.shouldExit = true;
+  setMode(state, "STOPPED");
+  setLastAction(state, "Stopped outside working hours");
+
+  await logger.info("Outside working hours — stopping bot", {
+    currentTime:
+      formatWorkingHoursCurrentTime(now, config.workingHours.timezone) ||
+      now.toISOString(),
+    workingHoursTimezone: config.workingHours.timezone,
+    workingHoursStart: config.workingHours.start,
+    workingHoursEnd: config.workingHours.end,
+  });
+
+  return true;
+}
+
 function createOwnershipBypassAssessment() {
   return {
     decision: "",
@@ -157,6 +294,7 @@ function buildDecisionLogPayload({
     scoringMessageBasis: finalAssessment.scoringMessageBasis,
     scoringMessagesUsed: finalAssessment.scoringMessagesUsed,
     combinedText: finalAssessment.combinedText,
+    decisionCapReason: finalAssessment.decisionCapReason || "",
     preliminaryScore: preliminary.preliminaryScore,
     finalScore: finalAssessment.finalScore,
     decision,
@@ -776,6 +914,10 @@ async function scanLoop({ page, state, config, logger, seenSet, watchlist }) {
       continue;
     }
 
+    if (await stopDueToOutsideWorkingHours(state, logger, config)) {
+      break;
+    }
+
     try {
       const deals = await scanDealRows(page, logger, config.url);
       const visibleDealsById = new Map(
@@ -803,6 +945,10 @@ async function scanLoop({ page, state, config, logger, seenSet, watchlist }) {
 
       for (const deal of deals) {
         if (state.shouldExit || state.mode !== "RUNNING") {
+          break;
+        }
+
+        if (await stopDueToOutsideWorkingHours(state, logger, config)) {
           break;
         }
 
@@ -855,6 +1001,10 @@ async function scanLoop({ page, state, config, logger, seenSet, watchlist }) {
         error: error.message,
       });
       setLastAction(state, `Cycle error: ${error.message}`);
+    }
+
+    if (state.shouldExit) {
+      break;
     }
 
     await sleep(config.pollIntervalMs);

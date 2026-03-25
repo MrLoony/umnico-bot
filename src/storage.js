@@ -44,6 +44,12 @@ const DEFAULT_CONFIG = {
     assistantNames: [],
     ownershipIgnoredOutgoingPatterns: [],
   },
+  workingHours: {
+    enabled: false,
+    timezone: "UTC",
+    start: "00:00",
+    end: "23:59",
+  },
   watchlist: {
     enabled: true,
     cooldownSeconds: 90,
@@ -145,6 +151,31 @@ function mergeConfig(rawConfig) {
     ownershipIgnoredOutgoingPatterns: [
       ...normalizedConfig.ownershipRules.ownershipIgnoredOutgoingPatterns,
     ],
+  };
+
+  normalizedConfig.workingHours = {
+    ...DEFAULT_CONFIG.workingHours,
+    ...(rawConfig?.workingHours || {}),
+    enabled:
+      typeof rawConfig?.workingHours?.enabled === "boolean"
+        ? rawConfig.workingHours.enabled
+        : DEFAULT_CONFIG.workingHours.enabled,
+    timezone:
+      typeof rawConfig?.workingHours?.timezone === "string" &&
+      rawConfig.workingHours.timezone.trim()
+        ? rawConfig.workingHours.timezone.trim()
+        : normalizedConfig.ownershipRules.timezone ||
+          DEFAULT_CONFIG.workingHours.timezone,
+    start:
+      typeof rawConfig?.workingHours?.start === "string" &&
+      rawConfig.workingHours.start.trim()
+        ? rawConfig.workingHours.start.trim()
+        : DEFAULT_CONFIG.workingHours.start,
+    end:
+      typeof rawConfig?.workingHours?.end === "string" &&
+      rawConfig.workingHours.end.trim()
+        ? rawConfig.workingHours.end.trim()
+        : DEFAULT_CONFIG.workingHours.end,
   };
 
   normalizedConfig.watchlist = {

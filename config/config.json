@@ -419,5 +419,12 @@
     "dayBoundaryTime": "10:00",
     "currentUserName": "Tatiana Gurchenko",
     "assistantNames": []
+  },
+
+  "workingHours": {
+    "enabled": true,
+    "timezone": "Asia/Tbilisi",
+    "start": "10:00",
+    "end": "22:00"
   }
 }

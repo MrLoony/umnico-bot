@@ -2,6 +2,13 @@ const { normalizeText, parseTimestamp, toLowerNormalized } = require("./utils");
 
 const MAX_SCORING_MESSAGES = 3;
 const MESSAGE_TIME_WINDOW_MS = 15 * 60 * 1000;
+const WEAK_FALLBACK_PREVIEW_VALUES = new Set([
+  "hi",
+  "hello",
+  "hey",
+  "yo",
+  "ok",
+]);
 
 const TOKEN_CHAR_REGEX = /[\p{L}\p{N}]/u;
 
@@ -203,6 +210,15 @@ function hasPositiveTextSignal(...scores) {
     (score) =>
       Array.isArray(score.hits) && score.hits.length > 0 && score.score > 0,
   );
+}
+
+function isWeakFallbackPreview(previewText) {
+  const normalizedPreview = normalizeText(previewText);
+  if (!normalizedPreview || normalizedPreview.length < 5) {
+    return true;
+  }
+
+  return WEAK_FALLBACK_PREVIEW_VALUES.has(toLowerNormalized(normalizedPreview));
 }
 
 function buildSelectionFromTextMessages(messages, basis) {
@@ -436,8 +452,20 @@ function buildFinalAssessment(deal, chatSnapshot, config) {
     decision = "OPEN_CHECK";
   }
 
+  let decisionCapReason = "";
+  if (
+    decision === "ACCEPT_CANDIDATE" &&
+    chatSnapshot?.incomingDetectionMode === "fallback_message_text_selector" &&
+    selectedMessages.basis === "all_messages_fallback" &&
+    isWeakFallbackPreview(deal.previewText)
+  ) {
+    decision = "OPEN_CHECK";
+    decisionCapReason = "accept_capped_due_to_weak_preview_fallback";
+  }
+
   return {
     decision,
+    decisionCapReason,
     finalScore,
     scoringMessageBasis: selectedMessages.basis,
     scoringMessagesUsed: selectedMessages.scoringMessagesUsed,
